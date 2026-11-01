@@ -21,3 +21,19 @@ pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     }
     r
 }
+
+pub fn rdmsr(msr: u32) -> u64 {
+    let (lo, hi): (u32, u32);
+    unsafe {
+        asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
+             options(nomem, nostack, preserves_flags));
+    }
+    ((hi as u64) << 32) | lo as u64
+}
+
+/// # Safety
+/// Escribir un MSR puede cambiar el comportamiento de toda la CPU.
+pub unsafe fn wrmsr(msr: u32, val: u64) {
+    asm!("wrmsr", in("ecx") msr, in("eax") val as u32, in("edx") (val >> 32) as u32,
+         options(nomem, nostack, preserves_flags));
+}

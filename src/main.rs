@@ -16,8 +16,10 @@ mod paging;
 mod pic;
 mod pmm;
 mod port;
+mod process;
 mod scheduler;
 mod shell;
+mod syscall;
 mod timer;
 
 use core::arch::asm;
@@ -43,6 +45,8 @@ extern "C" fn _start() -> ! {
         println!("[ok] GDT y TSS cargadas");
         idt::init();
         println!("[ok] IDT cargada (excepciones 0-31)");
+        syscall::init();
+        println!("[ok] SYSCALL habilitada; segmentos de usuario en la GDT");
 
         // Prueba de una excepcion recuperable: int3 -> handler -> vuelve aqui.
         asm!("int3");

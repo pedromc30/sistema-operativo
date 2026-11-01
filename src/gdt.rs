@@ -7,9 +7,15 @@
 use core::arch::asm;
 use core::mem::size_of;
 
+// Orden OBLIGADO por la instrucción SYSCALL/SYSRET: con STAR[63:48] = 0x10,
+// SYSRET usa SS = 0x10+8 (datos usuario) y CS = 0x10+16 (código usuario).
 pub const KERNEL_CS: u16 = 0x08; // entrada 1
 pub const KERNEL_DS: u16 = 0x10; // entrada 2
-const TSS_SEL: u16 = 0x18; // entrada 3 (ocupa 2 huecos de 8 bytes)
+#[allow(dead_code)]
+pub const USER_DS: u16 = 0x18 | 3; // entrada 3, RPL 3 -> 0x1b
+#[allow(dead_code)]
+pub const USER_CS: u16 = 0x20 | 3; // entrada 4, RPL 3 -> 0x23
+const TSS_SEL: u16 = 0x28; // entradas 5 y 6 (el TSS ocupa 16 bytes)
 
 /// Índice IST (1..=7) que usará el double fault.
 pub const DOUBLE_FAULT_IST: u8 = 1;
@@ -40,7 +46,7 @@ static mut TSS: Tss = Tss {
     iomap_base: 0,
 };
 
-static mut GDT: [u64; 5] = [0; 5];
+static mut GDT: [u64; 7] = [0; 7];
 
 #[repr(C, packed)]
 struct DescriptorPointer {
@@ -67,15 +73,17 @@ pub unsafe fn init() {
     let high = base >> 32;
 
     GDT = [
-        0,                  // 0x00: descriptor nulo obligatorio
+        0,                     // 0x00: descriptor nulo obligatorio
         0x00AF_9A00_0000_FFFF, // 0x08: código 64 bits, ring 0
         0x00CF_9200_0000_FFFF, // 0x10: datos, ring 0
-        low,                // 0x18: TSS (parte baja)
-        high,               //       TSS (parte alta)
+        0x00CF_F200_0000_FFFF, // 0x18: datos, ring 3 (DPL=3)
+        0x00AF_FA00_0000_FFFF, // 0x20: código 64 bits, ring 3 (DPL=3)
+        low,                   // 0x28: TSS (parte baja)
+        high,                  //       TSS (parte alta)
     ];
 
     let ptr = DescriptorPointer {
-        limit: (size_of::<[u64; 5]>() - 1) as u16,
+        limit: (size_of::<[u64; 7]>() - 1) as u16,
         base: &raw const GDT as u64,
     };
     asm!("lgdt [{}]", in(reg) &ptr, options(readonly, nostack, preserves_flags));
@@ -107,4 +115,10 @@ pub unsafe fn init() {
     );
     // Cargar el registro de tarea con el selector del TSS.
     asm!("ltr {0:x}", in(reg) TSS_SEL, options(nostack, preserves_flags));
+}
+
+/// Fija la pila a la que salta la CPU al pasar de modo usuario (ring 3) a kernel
+/// (ring 0) por una interrupción o excepción: TSS.rsp0.
+pub fn set_kernel_stack(top: u64) {
+    unsafe { (*(&raw mut TSS)).rsp[0] = top };
 }

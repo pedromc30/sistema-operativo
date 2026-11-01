@@ -49,6 +49,18 @@ impl Write for Serial {
     }
 }
 
+/// Escribe bytes crudos (los datos de un programa de usuario no tienen por qué ser UTF-8).
+pub fn write_bytes(bytes: &[u8]) {
+    crate::cpu::without_interrupts(|| {
+        for &b in bytes {
+            unsafe {
+                while inb(COM1 + 5) & 0x20 == 0 {}
+                outb(COM1, b);
+            }
+        }
+    });
+}
+
 pub fn _print(args: fmt::Arguments) {
     // Con interrupciones desactivadas para que las líneas de tareas distintas no se mezclen.
     crate::cpu::without_interrupts(|| {

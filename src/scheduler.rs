@@ -5,7 +5,7 @@
 //! tarea y restaurar sus registros. El temporizador llama a `preempt()` en cada
 //! tick, así que ninguna tarea necesita ceder la CPU voluntariamente.
 
-use crate::cpu;
+use crate::{cpu, gdt, paging, syscall};
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::arch::{asm, global_asm};
 
@@ -31,15 +31,21 @@ struct Task {
     entry: Option<fn()>, // función que ejecuta
     ticks: u64,          // ticks de CPU consumidos
     idle: bool,          // tarea ociosa: solo corre si no hay nada más que hacer
+    // --- procesos de usuario ---
+    cr3: u64,         // PML4 propia (0 = tarea de kernel: usa la del kernel)
+    kstack_top: u64,  // cima de su pila de kernel (TSS.rsp0 y pila de syscall)
+    user_rip: u64,    // dónde empieza a ejecutar en modo usuario
+    user_rsp: u64,    // su pila de usuario
 }
 
 struct Scheduler {
     tasks: Vec<Box<Task>>, // Box: la dirección de cada Task no cambia al crecer el Vec
     current: u64,          // id de la tarea en ejecución
     next_id: u64,
+    kernel_cr3: u64,       // tablas de páginas del kernel (las de Limine)
 }
 
-static mut SCHED: Scheduler = Scheduler { tasks: Vec::new(), current: 0, next_id: 1 };
+static mut SCHED: Scheduler = Scheduler { tasks: Vec::new(), current: 0, next_id: 1, kernel_cr3: 0 };
 
 fn sched() -> &'static mut Scheduler {
     unsafe { &mut *(&raw mut SCHED) }
@@ -102,8 +108,13 @@ pub fn init() {
             entry: None,
             ticks: 0,
             idle: false,
+            cr3: 0,
+            kstack_top: 0,
+            user_rip: 0,
+            user_rsp: 0,
         }));
         s.current = 0;
+        s.kernel_cr3 = paging::read_cr3() & !0xfff;
     });
     // Tarea ociosa: ocupa la CPU cuando todas las demás están bloqueadas.
     let id = spawn("idle", idle_loop);
@@ -120,8 +131,19 @@ fn idle_loop() {
     }
 }
 
-/// Crea una tarea nueva que ejecutará `entry`. Devuelve su id.
+/// Crea una tarea de kernel que ejecutará `entry`. Devuelve su id.
 pub fn spawn(name: &str, entry: fn()) -> u64 {
+    spawn_with(name, entry, 0, 0, 0)
+}
+
+/// Crea una tarea que, al arrancar, ejecuta `entry` (en modo kernel) con el espacio
+/// de direcciones `cr3` (0 = el del kernel). Para procesos de usuario, `entry` salta
+/// a modo usuario en `user_rip` con la pila `user_rsp`.
+pub fn spawn_user(name: &str, entry: fn(), cr3: u64, user_rip: u64, user_rsp: u64) -> u64 {
+    spawn_with(name, entry, cr3, user_rip, user_rsp)
+}
+
+fn spawn_with(name: &str, entry: fn(), cr3: u64, user_rip: u64, user_rsp: u64) -> u64 {
     cpu::without_interrupts(|| {
         let s = sched();
         let mut stack = vec![0u8; STACK_SIZE];
@@ -151,6 +173,10 @@ pub fn spawn(name: &str, entry: fn()) -> u64 {
             entry: Some(entry),
             ticks: 0,
             idle: false,
+            cr3,
+            kstack_top: top as u64,
+            user_rip,
+            user_rsp,
         }));
         id
     })
@@ -211,6 +237,16 @@ unsafe fn schedule() {
     (*new).state = State::Running;
     s.current = (*new).id;
 
+    // Cambio de espacio de direcciones (si hace falta) y de pila de kernel de la CPU.
+    let new_cr3 = if (*new).cr3 != 0 { (*new).cr3 } else { s.kernel_cr3 };
+    if new_cr3 != paging::read_cr3() & !0xfff {
+        paging::write_cr3(new_cr3);
+    }
+    if (*new).kstack_top != 0 {
+        gdt::set_kernel_stack((*new).kstack_top); // al llegar una IRQ desde ring 3
+        syscall::set_kernel_stack((*new).kstack_top); // al hacer SYSCALL
+    }
+
     switch_context(&raw mut (*old).rsp, (*new).rsp);
 
     // Aquí solo se vuelve cuando OTRA tarea nos reanude. Aprovechamos para liberar
@@ -222,7 +258,19 @@ unsafe fn schedule() {
 fn reap() {
     let s = sched();
     let cur = s.current;
-    s.tasks.retain(|t| t.state != State::Dead || t.id == cur);
+    let mut i = 0;
+    while i < s.tasks.len() {
+        if s.tasks[i].state == State::Dead && s.tasks[i].id != cur {
+            let t = s.tasks.remove(i);
+            if t.cr3 != 0 {
+                // Libera páginas y tablas del proceso. Seguro: el CR3 activo es otro.
+                unsafe { paging::destroy_address_space(t.cr3) };
+            }
+            // `t` se destruye aquí: se libera también su pila de kernel.
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Cede la CPU voluntariamente.
@@ -313,10 +361,11 @@ extern "C" fn thread_start() -> ! {
     if let Some(f) = entry {
         f();
     }
-    exit()
+    exit_current()
 }
 
-fn exit() -> ! {
+/// Termina la tarea actual (la marca muerta y cambia a otra; no vuelve).
+pub fn exit_current() -> ! {
     cpu::without_interrupts(|| {
         let s = sched();
         let cur = s.current;
@@ -337,6 +386,7 @@ pub struct TaskInfo {
     pub name: String,
     pub state: &'static str,
     pub ticks: u64,
+    pub user: bool,
 }
 
 pub fn list() -> Vec<TaskInfo> {
@@ -355,6 +405,7 @@ pub fn list() -> Vec<TaskInfo> {
                     State::Dead => "terminada",
                 },
                 ticks: t.ticks,
+                user: t.cr3 != 0,
             })
             .collect()
     })
@@ -365,5 +416,22 @@ pub fn current_name() -> String {
         let s = sched();
         let cur = s.current;
         s.tasks.iter().find(|t| t.id == cur).map(|t| t.name.clone()).unwrap_or_default()
+    })
+}
+
+pub fn current_id() -> u64 {
+    sched().current
+}
+
+/// (rip, rsp) de usuario de la tarea actual.
+pub fn current_user_entry() -> (u64, u64) {
+    cpu::without_interrupts(|| {
+        let s = sched();
+        let cur = s.current;
+        s.tasks
+            .iter()
+            .find(|t| t.id == cur)
+            .map(|t| (t.user_rip, t.user_rsp))
+            .unwrap_or((0, 0))
     })
 }

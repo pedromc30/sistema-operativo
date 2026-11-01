@@ -1,6 +1,6 @@
 //! Mini shell: lee una línea, la parte en palabras (usa el heap) y ejecuta.
 
-use crate::{heap, input, pmm, scheduler, timer};
+use crate::{heap, input, pmm, process, scheduler, timer};
 use alloc::{string::String, vec::Vec};
 
 fn read_line() -> String {
@@ -73,6 +73,7 @@ pub fn run() -> ! {
                 println!("  ps            lista las tareas");
                 println!("  spawn <nombre> crea una tarea que cuenta durante 5 s (usa CPU)");
                 println!("  sleeper <nombre> crea una tarea que duerme entre mensajes (no usa CPU)");
+                println!("  run <programa> ejecuta un programa en modo usuario (hello, crash, cli, ptr)");
                 println!("  panic         provoca un kernel panic");
                 println!("  halt          detiene el sistema");
             }
@@ -87,9 +88,10 @@ pub fn run() -> ! {
                 println!("heap libre:    {} de {} bytes", heap::free_bytes(), heap::HEAP_SIZE);
             }
             ["ps"] => {
-                println!("{:>3}  {:<12} {:<11} {:>10}", "ID", "NOMBRE", "ESTADO", "CPU(ticks)");
+                println!("{:>3}  {:<12} {:<8} {:<11} {:>10}", "ID", "NOMBRE", "TIPO", "ESTADO", "CPU(ticks)");
                 for t in scheduler::list() {
-                    println!("{:>3}  {:<12} {:<11} {:>10}", t.id, t.name, t.state, t.ticks);
+                    println!("{:>3}  {:<12} {:<8} {:<11} {:>10}", t.id, t.name,
+                        if t.user { "usuario" } else { "kernel" }, t.state, t.ticks);
                 }
             }
             ["spawn", name] => {
@@ -101,6 +103,14 @@ pub fn run() -> ! {
                 let id = scheduler::spawn(name, sleeper);
                 println!("tarea '{}' creada (id {}): duerme 1 s entre mensajes", name, id);
             }
+            ["run", prog] => match process::program(prog) {
+                Some(code) => match process::spawn(prog, code) {
+                    Ok(id) => println!("proceso '{}' creado (id {}, {} bytes) en modo usuario", prog, id, code.len()),
+                    Err(e) => println!("no se pudo crear el proceso: {}", e),
+                },
+                None => println!("programa desconocido '{}'. Disponibles: {:?}", prog, process::PROGRAMS),
+            },
+            ["run"] => println!("uso: run <programa>   (disponibles: {:?})", process::PROGRAMS),
             ["sleeper"] => println!("uso: sleeper <nombre>"),
             ["echo", rest @ ..] => println!("{}", rest.join(" ")),
             ["clear"] => print!("\x1b[2J\x1b[H"),

@@ -197,6 +197,25 @@ extern "C" fn exception_handler(f: &mut Frame) {
 
     let name = NAMES.get(f.vector as usize).copied().unwrap_or("Desconocida");
 
+    // Excepción provocada por un programa de USUARIO (CS con RPL 3): se mata ese
+    // proceso y el sistema sigue. Es la razón de ser de la protección.
+    if f.cs & 3 == 3 {
+        let mut extra = alloc::string::String::new();
+        if f.vector == 14 {
+            let cr2: u64;
+            unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags)) };
+            extra = alloc::format!(" | direccion {:#x}", cr2);
+        }
+        println!("[kernel] proceso '{}' (id {}) terminado: {} en modo usuario{}",
+            crate::scheduler::current_name(), crate::scheduler::current_id(), name, extra);
+        println!("         rip={:#x} cs={:#x} (anillo {}) error_code={:#x}",
+            f.rip, f.cs, f.cs & 3, f.error_code);
+        // exit_current() no vuelve: hay que liberar a mano lo que tengamos en el heap,
+        // porque sus destructores nunca se ejecutarían.
+        drop(extra);
+        crate::scheduler::exit_current();
+    }
+
     // El breakpoint es una "trampa": se puede continuar tras ella.
     if f.vector == 3 {
         println!("[#BP] breakpoint en rip={:#x}; continuamos", f.rip);
