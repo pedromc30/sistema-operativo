@@ -10,7 +10,10 @@ mod heap;
 mod idt;
 mod limine;
 mod paging;
+mod pic;
 mod pmm;
+mod port;
+mod timer;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -62,7 +65,26 @@ extern "C" fn _start() -> ! {
         asm!("ud2");
     }
 
+    timer_demo();
+
     halt();
+}
+
+fn timer_demo() {
+    println!();
+    println!("--- Temporizador (PIT -> IRQ0 -> vector 32) ---");
+    unsafe {
+        pic::init();
+        timer::init();
+        asm!("sti"); // a partir de aquí la CPU acepta interrupciones de hardware
+    }
+    println!("interrupciones activadas, {} Hz (1 tick = {} ms)", timer::HZ, 1000 / timer::HZ);
+    let t0 = timer::ticks();
+    for s in 1..=5 {
+        timer::sleep_ms(1000);
+        println!("uptime: {} s  (ticks={}, {} ms)", s, timer::ticks(), timer::uptime_ms());
+    }
+    println!("5 s esperados -> {} ticks (esperado ~500)", timer::ticks() - t0);
 }
 
 fn heap_demo() {

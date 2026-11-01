@@ -49,6 +49,10 @@ global_asm!(
     .irp n, 8,10,11,12,13,14,17,21,29,30
         isr_err \n
     .endr
+    # IRQ de hardware (PIC remapeado): vectores 32..47, sin código de error.
+    .irp n, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
+        isr_noerr \n
+    .endr
 
     isr_common:
         push rax
@@ -91,7 +95,7 @@ global_asm!(
     .balign 8
     .global isr_stub_table
     isr_stub_table:
-    .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+    .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
         .quad isr_stub_\n
     .endr
     .text
@@ -99,7 +103,7 @@ global_asm!(
 );
 
 extern "C" {
-    static isr_stub_table: [u64; 32];
+    static isr_stub_table: [u64; 48];
 }
 
 #[repr(C)]
@@ -144,7 +148,7 @@ struct DescriptorPointer {
 /// # Safety
 /// Requiere que la GDT ya esté cargada.
 pub unsafe fn init() {
-    for v in 0..32 {
+    for v in 0..48 {
         // El double fault (8) usa su propia pila (IST) para poder reportarse
         // incluso si la pila normal está corrupta o desbordada.
         let ist = if v == 8 { gdt::DOUBLE_FAULT_IST } else { 0 };
@@ -171,6 +175,17 @@ const NAMES: [&str; 32] = [
 
 #[no_mangle]
 extern "C" fn exception_handler(f: &mut Frame) {
+    // Vectores 32..47: no son excepciones sino interrupciones de hardware (IRQ).
+    if f.vector >= 32 {
+        let irq = (f.vector - 32) as u8;
+        match irq {
+            0 => crate::timer::on_tick(),
+            _ => println!("IRQ {} inesperada", irq),
+        }
+        crate::pic::eoi(irq);
+        return;
+    }
+
     let name = NAMES.get(f.vector as usize).copied().unwrap_or("Desconocida");
 
     // El breakpoint es una "trampa": se puede continuar tras ella.

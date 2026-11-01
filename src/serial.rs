@@ -1,19 +1,9 @@
 //! Puerto serie COM1 (UART 16550). Es nuestra "pantalla" por ahora.
 
-use core::arch::asm;
+use crate::port::{inb, outb};
 use core::fmt::{self, Write};
 
 const COM1: u16 = 0x3F8;
-
-unsafe fn outb(port: u16, val: u8) {
-    asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags));
-}
-
-unsafe fn inb(port: u16) -> u8 {
-    let v: u8;
-    asm!("in al, dx", in("dx") port, out("al") v, options(nomem, nostack, preserves_flags));
-    v
-}
 
 /// Inicializa el UART a 115200 baudios, 8 bits, sin paridad, 1 bit de stop.
 pub fn init() {
