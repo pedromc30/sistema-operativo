@@ -1,0 +1,6 @@
+target/
+third_party_limine/
+iso_root/
+*.iso
+esp/
+ovmf_vars.fd
