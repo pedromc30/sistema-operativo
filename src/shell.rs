@@ -44,6 +44,16 @@ fn worker() {
     println!("[{}] termina", name);
 }
 
+/// Tarea de demostración que DUERME entre mensajes: casi no consume CPU.
+fn sleeper() {
+    let name = scheduler::current_name();
+    for i in 1..=5 {
+        timer::sleep_ms(1000);
+        println!("[{}] desperte ({}/5) a los {} ms", name, i, timer::uptime_ms());
+    }
+    println!("[{}] termina", name);
+}
+
 pub fn run() -> ! {
     println!();
     println!("=== Shell de RustOS ===  (escribe 'help')");
@@ -61,7 +71,8 @@ pub fn run() -> ! {
                 println!("  echo <texto>  repite el texto");
                 println!("  clear         limpia la pantalla");
                 println!("  ps            lista las tareas");
-                println!("  spawn <nombre> crea una tarea que cuenta durante 5 s");
+                println!("  spawn <nombre> crea una tarea que cuenta durante 5 s (usa CPU)");
+                println!("  sleeper <nombre> crea una tarea que duerme entre mensajes (no usa CPU)");
                 println!("  panic         provoca un kernel panic");
                 println!("  halt          detiene el sistema");
             }
@@ -86,6 +97,11 @@ pub fn run() -> ! {
                 println!("tarea '{}' creada (id {})", name, id);
             }
             ["spawn"] => println!("uso: spawn <nombre>"),
+            ["sleeper", name] => {
+                let id = scheduler::spawn(name, sleeper);
+                println!("tarea '{}' creada (id {}): duerme 1 s entre mensajes", name, id);
+            }
+            ["sleeper"] => println!("uso: sleeper <nombre>"),
             ["echo", rest @ ..] => println!("{}", rest.join(" ")),
             ["clear"] => print!("\x1b[2J\x1b[H"),
             ["panic"] => panic!("panico pedido desde el shell"),

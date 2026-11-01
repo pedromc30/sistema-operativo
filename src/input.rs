@@ -1,14 +1,13 @@
-//! Cola de entrada de caracteres (anillo de 256 bytes).
+//! Cola de entrada de caracteres (anillo de 4096 bytes).
 //!
 //! La rellenan los manejadores de interrupción (teclado PS/2 y puerto serie) y
 //! la vacía el código normal. Hay un único productor (la IRQ) y un único
 //! consumidor, así que bastan dos índices atómicos, sin cerrojos ni heap
 //! (dentro de una interrupción NO queremos reservar memoria).
 
-use core::arch::asm;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-const SIZE: usize = 256;
+const SIZE: usize = 4096;
 
 static BUF: [AtomicU8; SIZE] = [const { AtomicU8::new(0) }; SIZE];
 static HEAD: AtomicUsize = AtomicUsize::new(0); // siguiente posición a escribir
@@ -23,6 +22,11 @@ pub fn push(c: u8) {
     }
     BUF[head].store(c, Ordering::Relaxed);
     HEAD.store(next, Ordering::Release);
+    crate::scheduler::wake_input(); // despierta a quien espere teclas
+}
+
+pub fn has_data() -> bool {
+    TAIL.load(Ordering::Acquire) != HEAD.load(Ordering::Acquire)
 }
 
 pub fn pop() -> Option<u8> {
@@ -35,14 +39,13 @@ pub fn pop() -> Option<u8> {
     Some(c)
 }
 
-/// Bloquea hasta que haya un carácter. Mientras espera, la CPU duerme con `hlt`
-/// (la despierta cualquier interrupción; el temporizador garantiza que no
-/// se queda dormida para siempre).
+/// Bloquea la tarea hasta que haya un carácter. Mientras espera NO consume CPU:
+/// el planificador no la ejecuta hasta que una IRQ de teclado la despierte.
 pub fn read_char() -> u8 {
     loop {
         if let Some(c) = pop() {
             return c;
         }
-        unsafe { asm!("hlt", options(nomem, nostack)) };
+        crate::scheduler::wait_for_input();
     }
 }

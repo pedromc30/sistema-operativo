@@ -4,7 +4,6 @@
 //! contador llega a 0. Elegimos el divisor para obtener la frecuencia deseada.
 
 use crate::port::outb;
-use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 const PIT_FREQ: u64 = 1_193_182;
@@ -40,11 +39,9 @@ pub fn uptime_ms() -> u64 {
     ticks() * 1000 / HZ
 }
 
-/// Espera cediendo la CPU a otras tareas; si no hay nadie más, `hlt` la duerme hasta la próxima interrupción.
+/// Duerme la tarea actual `ms` milisegundos sin consumir CPU: el planificador
+/// no la ejecuta hasta que venza el plazo.
 pub fn sleep_ms(ms: u64) {
-    let target = ticks() + (ms * HZ + 999) / 1000;
-    while ticks() < target {
-        crate::scheduler::yield_now(); // deja correr a otras tareas
-        unsafe { asm!("hlt", options(nomem, nostack)) };
-    }
+    let wake = ticks() + (ms * HZ + 999) / 1000;
+    crate::scheduler::sleep_until(wake);
 }

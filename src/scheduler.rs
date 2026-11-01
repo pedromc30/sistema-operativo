@@ -17,6 +17,8 @@ const CANARY: u64 = 0xDEAD_C0DE_5AFE_57AC;
 enum State {
     Ready,
     Running,
+    Sleeping(u64), // dormida hasta que el reloj llegue a este tick
+    WaitInput,     // bloqueada esperando una tecla
     Dead,
 }
 
@@ -28,6 +30,7 @@ struct Task {
     stack: Vec<u8>,      // su pila (vive en el heap); vacía para la tarea inicial
     entry: Option<fn()>, // función que ejecuta
     ticks: u64,          // ticks de CPU consumidos
+    idle: bool,          // tarea ociosa: solo corre si no hay nada más que hacer
 }
 
 struct Scheduler {
@@ -98,9 +101,23 @@ pub fn init() {
             stack: Vec::new(),
             entry: None,
             ticks: 0,
+            idle: false,
         }));
         s.current = 0;
     });
+    // Tarea ociosa: ocupa la CPU cuando todas las demás están bloqueadas.
+    let id = spawn("idle", idle_loop);
+    cpu::without_interrupts(|| {
+        if let Some(t) = sched().tasks.iter_mut().find(|t| t.id == id) {
+            t.idle = true;
+        }
+    });
+}
+
+fn idle_loop() {
+    loop {
+        unsafe { asm!("hlt", options(nomem, nostack)) };
+    }
 }
 
 /// Crea una tarea nueva que ejecutará `entry`. Devuelve su id.
@@ -133,6 +150,7 @@ pub fn spawn(name: &str, entry: fn()) -> u64 {
             stack,
             entry: Some(entry),
             ticks: 0,
+            idle: false,
         }));
         id
     })
@@ -161,15 +179,29 @@ unsafe fn schedule() {
         }
     }
 
+    // 1) Primero, la siguiente tarea NORMAL que esté lista (round-robin).
     let mut next_pos = None;
     for off in 1..n {
         let p = (cur_pos + off) % n;
-        if s.tasks[p].state == State::Ready {
+        if s.tasks[p].state == State::Ready && !s.tasks[p].idle {
             next_pos = Some(p);
             break;
         }
     }
-    let Some(np) = next_pos else { return }; // nadie más listo: seguimos nosotros
+    // 2) Si no hay ninguna: si la actual sigue en marcha, continúa; si se ha
+    //    bloqueado (o terminado), toca la tarea ociosa.
+    let np = match next_pos {
+        Some(p) => p,
+        None => {
+            if s.tasks[cur_pos].state == State::Running {
+                return;
+            }
+            match s.tasks.iter().position(|t| t.idle && t.state == State::Ready) {
+                Some(p) => p,
+                None => return,
+            }
+        }
+    };
 
     let old: *mut Task = &mut *s.tasks[cur_pos];
     let new: *mut Task = &mut *s.tasks[np];
@@ -194,6 +226,7 @@ fn reap() {
 }
 
 /// Cede la CPU voluntariamente.
+#[allow(dead_code)]
 pub fn yield_now() {
     cpu::without_interrupts(|| unsafe { schedule() });
 }
@@ -205,10 +238,67 @@ pub fn preempt() {
         return; // el planificador aún no está iniciado
     }
     let cur = s.current;
-    if let Some(t) = s.tasks.iter_mut().find(|t| t.id == cur) {
-        t.ticks += 1;
+    let now = crate::timer::ticks();
+    for t in s.tasks.iter_mut() {
+        if t.id == cur {
+            t.ticks += 1;
+        }
+        // Despertar a las tareas dormidas cuyo plazo ya venció.
+        if let State::Sleeping(wake) = t.state {
+            if now >= wake {
+                t.state = State::Ready;
+            }
+        }
     }
     unsafe { schedule() };
+}
+
+/// Bloquea la tarea actual hasta el tick `wake`. No gasta CPU mientras duerme.
+pub fn sleep_until(wake: u64) {
+    if sched().tasks.is_empty() {
+        // Planificador sin iniciar: espera "a lo bruto".
+        while crate::timer::ticks() < wake {
+            unsafe { asm!("hlt", options(nomem, nostack)) };
+        }
+        return;
+    }
+    cpu::without_interrupts(|| {
+        if crate::timer::ticks() >= wake {
+            return;
+        }
+        let s = sched();
+        let cur = s.current;
+        if let Some(t) = s.tasks.iter_mut().find(|t| t.id == cur) {
+            t.state = State::Sleeping(wake);
+        }
+        unsafe { schedule() };
+    });
+}
+
+/// Bloquea la tarea actual hasta que haya entrada. La comprobación y el bloqueo se
+/// hacen con interrupciones desactivadas: si no, una tecla podría llegar justo
+/// entre las dos cosas y nadie despertaría a la tarea (un "lost wake-up").
+pub fn wait_for_input() {
+    cpu::without_interrupts(|| {
+        if crate::input::has_data() || sched().tasks.is_empty() {
+            return;
+        }
+        let s = sched();
+        let cur = s.current;
+        if let Some(t) = s.tasks.iter_mut().find(|t| t.id == cur) {
+            t.state = State::WaitInput;
+        }
+        unsafe { schedule() };
+    });
+}
+
+/// Despierta a las tareas que esperan entrada. La llama `input::push` desde una IRQ.
+pub fn wake_input() {
+    for t in sched().tasks.iter_mut() {
+        if t.state == State::WaitInput {
+            t.state = State::Ready;
+        }
+    }
 }
 
 /// Punto de entrada de toda tarea nueva (lo llama thread_trampoline).
@@ -260,6 +350,8 @@ pub fn list() -> Vec<TaskInfo> {
                 state: match t.state {
                     State::Ready => "lista",
                     State::Running => "ejecutando",
+                    State::Sleeping(_) => "durmiendo",
+                    State::WaitInput => "esp.entrada",
                     State::Dead => "terminada",
                 },
                 ticks: t.ticks,
