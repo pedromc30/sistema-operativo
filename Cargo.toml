@@ -10,3 +10,8 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[features]
+crash-pf = []
+crash-div = []
+crash-ud = []
