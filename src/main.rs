@@ -6,6 +6,8 @@ extern crate alloc;
 #[macro_use]
 mod serial;
 mod cpu;
+mod elf;
+mod fs;
 mod gdt;
 mod heap;
 mod idt;

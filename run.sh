@@ -4,6 +4,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# 1) Programas de usuario (proyecto aparte). RUSTFLAGS evita heredar las banderas del kernel.
+( cd user && RUSTFLAGS="-C relocation-model=static" cargo build --release )
+mkdir -p initrd && rm -f initrd/*
+cp rootfs/* initrd/
+for p in hello primes crash; do cp "user/target/x86_64-unknown-none/release/$p" "initrd/$p"; done
+
+# 2) Kernel (incrusta initrd/ al compilar)
 cargo build ${FEATURES:+--features "$FEATURES"}
 rm -rf esp && mkdir -p esp/EFI/BOOT esp/boot
 cp third_party_limine/BOOTX64.EFI esp/EFI/BOOT/BOOTX64.EFI

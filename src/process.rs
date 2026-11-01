@@ -1,26 +1,64 @@
 //! Procesos de usuario: espacio de direcciones propio + una tarea que salta a ring 3.
 
-use crate::{limine, paging, pmm, scheduler};
+use crate::{elf, limine, paging, pmm, scheduler};
 use core::arch::{asm, global_asm};
 
 pub const USER_CODE: u64 = 0x40_0000; // 4 MiB
 pub const USER_STACK_TOP: u64 = 0x80_0000; // 8 MiB (la pila crece hacia abajo)
-const USER_STACK_PAGES: u64 = 2;
+const USER_STACK_PAGES: u64 = 8;
+pub const MAX_ARGS: usize = 256;
 const PAGE: u64 = 4096;
 
-/// Crea un proceso que ejecuta `code` (código máquina independiente de la posición).
-pub fn spawn(name: &str, code: &[u8]) -> Result<u64, &'static str> {
+/// Crea un proceso a partir de código máquina plano (los programas en ensamblador
+/// incrustados): se copia tal cual en USER_CODE.
+pub fn spawn_raw(name: &str, code: &[u8]) -> Result<u64, &'static str> {
     let root = paging::new_address_space().ok_or("sin memoria para el espacio de direcciones")?;
-    if let Err(e) = unsafe { build_image(root, code) } {
-        unsafe { paging::destroy_address_space(root) }; // deshace lo ya mapeado
-        return Err(e);
+    let r = unsafe { build_flat_image(root, code).and_then(|_| build_stack(root, "")) };
+    match r {
+        Ok((rsp, a0, a1)) => Ok(scheduler::spawn_user(name, user_task_main, root, USER_CODE, rsp, a0, a1)),
+        Err(e) => {
+            unsafe { paging::destroy_address_space(root) }; // deshace lo ya mapeado
+            Err(e)
+        }
     }
-    Ok(scheduler::spawn_user(name, user_task_main, root, USER_CODE, USER_STACK_TOP))
 }
 
-unsafe fn build_image(root: u64, code: &[u8]) -> Result<(), &'static str> {
-    let hhdm = limine::hhdm_offset().ok_or("sin HHDM")?;
+/// Crea un proceso a partir de un ejecutable ELF. `args` se copia en su pila y se
+/// le pasa a `_start(args_ptr, args_len)`.
+pub fn spawn_elf(name: &str, elf_bytes: &[u8], args: &str) -> Result<u64, alloc::string::String> {
+    use alloc::string::String;
+    if args.len() > MAX_ARGS {
+        return Err(String::from("argumentos demasiado largos"));
+    }
+    let root = paging::new_address_space().ok_or_else(|| String::from("sin memoria"))?;
+    let r = unsafe { elf::load(root, elf_bytes) };
+    let entry = match r {
+        Ok(e) => e,
+        Err(e) => {
+            unsafe { paging::destroy_address_space(root) };
+            return Err(String::from(e.describe()));
+        }
+    };
+    match unsafe { build_stack(root, args) } {
+        Ok((rsp, a0, a1)) => Ok(scheduler::spawn_user(name, user_task_main, root, entry, rsp, a0, a1)),
+        Err(e) => {
+            unsafe { paging::destroy_address_space(root) };
+            Err(String::from(e))
+        }
+    }
+}
 
+/// Solo comprueba si un ELF se puede cargar (crea el espacio de direcciones, carga y lo
+/// destruye). No ejecuta nada: sirve para probar el cargador a fondo.
+pub fn check_elf(elf_bytes: &[u8]) -> Result<(), &'static str> {
+    let root = paging::new_address_space().ok_or("sin memoria")?;
+    let r = unsafe { elf::load(root, elf_bytes) };
+    unsafe { paging::destroy_address_space(root) };
+    r.map(|_| ()).map_err(|e| e.describe())
+}
+
+unsafe fn build_flat_image(root: u64, code: &[u8]) -> Result<(), &'static str> {
+    let hhdm = limine::hhdm_offset().ok_or("sin HHDM")?;
     // Código: solo lectura y ejecutable (USER sin WRITABLE).
     let pages = (code.len() as u64 + PAGE - 1) / PAGE;
     for i in 0..pages {
@@ -30,33 +68,54 @@ unsafe fn build_image(root: u64, code: &[u8]) -> Result<(), &'static str> {
         let off = (i * PAGE) as usize;
         let n = (code.len() - off).min(PAGE as usize);
         core::ptr::copy_nonoverlapping(code.as_ptr().add(off), dst, n);
-        paging::map_page_in(root, USER_CODE + i * PAGE, frame, paging::USER)
-            .map_err(|_| "no se pudo mapear el código")?;
-    }
-
-    // Pila: lectura/escritura y, si la CPU lo soporta, no ejecutable.
-    let mut flags = paging::USER | paging::WRITABLE;
-    if paging::nx_enabled() {
-        flags |= paging::NX;
-    }
-    for i in 0..USER_STACK_PAGES {
-        let frame = pmm::alloc_frame().ok_or("sin memoria")?;
-        core::ptr::write_bytes((frame + hhdm) as *mut u8, 0, PAGE as usize);
-        let virt = USER_STACK_TOP - (i + 1) * PAGE;
-        paging::map_page_in(root, virt, frame, flags).map_err(|_| "no se pudo mapear la pila")?;
+        if paging::map_page_in(root, USER_CODE + i * PAGE, frame, paging::USER).is_err() {
+            pmm::free_frame(frame);
+            return Err("no se pudo mapear el codigo");
+        }
     }
     Ok(())
 }
 
+/// Crea la pila de usuario y copia en ella los argumentos.
+/// Devuelve (rsp inicial, puntero a args, longitud de args).
+unsafe fn build_stack(root: u64, args: &str) -> Result<(u64, u64, u64), &'static str> {
+    let hhdm = limine::hhdm_offset().ok_or("sin HHDM")?;
+    // Lectura/escritura y, si la CPU lo soporta, no ejecutable.
+    let mut flags = paging::USER | paging::WRITABLE;
+    if paging::nx_enabled() {
+        flags |= paging::NX;
+    }
+    let mut top_frame = 0;
+    for i in 0..USER_STACK_PAGES {
+        let frame = pmm::alloc_frame().ok_or("sin memoria")?;
+        core::ptr::write_bytes((frame + hhdm) as *mut u8, 0, PAGE as usize);
+        let virt = USER_STACK_TOP - (i + 1) * PAGE;
+        if paging::map_page_in(root, virt, frame, flags).is_err() {
+            pmm::free_frame(frame);
+            return Err("no se pudo mapear la pila");
+        }
+        if i == 0 {
+            top_frame = frame;
+        }
+    }
+    // Los argumentos van en la parte más alta de la pila (en la primera página).
+    let len = args.len() as u64;
+    let args_addr = (USER_STACK_TOP - len) & !15;
+    let off = args_addr - (USER_STACK_TOP - PAGE);
+    core::ptr::copy_nonoverlapping(args.as_ptr(), (top_frame + hhdm + off) as *mut u8, args.len());
+    // rsp ≡ 8 (mod 16) en la entrada, como si hubiésemos llegado con un `call`.
+    Ok((args_addr - 8, args_addr, len))
+}
+
 /// Lo que ejecuta (en modo kernel) la tarea de un proceso: saltar a modo usuario.
 fn user_task_main() {
-    let (rip, rsp) = scheduler::current_user_entry();
-    unsafe { enter_user(rip, rsp) }
+    let (rip, rsp, arg0, arg1) = scheduler::current_user_entry();
+    unsafe { enter_user(rip, rsp, arg0, arg1) }
 }
 
 /// Pasa a ring 3 con `iretq`: la CPU saca de la pila SS, RSP, RFLAGS, CS y RIP, y los
 /// carga. Al cargar un CS de DPL 3 se pasa al anillo 3.
-unsafe fn enter_user(rip: u64, rsp: u64) -> ! {
+unsafe fn enter_user(rip: u64, rsp: u64, arg0: u64, arg1: u64) -> ! {
     asm!(
         "mov ds, {ds:x}",
         "mov es, {ds:x}",
@@ -72,6 +131,8 @@ unsafe fn enter_user(rip: u64, rsp: u64) -> ! {
         rflags = in(reg) 0x202u64,
         cs = in(reg) 0x23u64,
         rip = in(reg) rip,
+        in("rdi") arg0, // 1er argumento de _start: puntero a los argumentos
+        in("rsi") arg1, // 2º argumento: su longitud
         options(noreturn),
     );
 }
@@ -205,15 +266,15 @@ macro_rules! blob {
     }};
 }
 
-/// Programas de usuario incluidos en el kernel (todavía no hay sistema de archivos).
+/// Programas de usuario en ensamblador incrustados en el kernel (pruebas de protección).
 pub fn program(name: &str) -> Option<&'static [u8]> {
     Some(match name {
-        "hello" => blob!(user_hello_start, user_hello_end),
-        "crash" => blob!(user_crash_start, user_crash_end),
+        "asm-hello" => blob!(user_hello_start, user_hello_end),
+        "asm-crash" => blob!(user_crash_start, user_crash_end),
         "cli" => blob!(user_cli_start, user_cli_end),
         "ptr" => blob!(user_ptr_start, user_ptr_end),
         _ => return None,
     })
 }
 
-pub const PROGRAMS: &[&str] = &["hello", "crash", "cli", "ptr"];
+pub const PROGRAMS: &[&str] = &["asm-hello", "asm-crash", "cli", "ptr"];

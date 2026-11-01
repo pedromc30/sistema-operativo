@@ -1,0 +1,4 @@
+Bienvenido a RustOS.
+
+Este archivo vive en el initrd: una carpeta que se incrusta en el kernel al
+compilar. Prueba:   ls     cat leeme.txt     run hello     run primes 100000

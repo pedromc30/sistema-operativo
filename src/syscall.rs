@@ -9,6 +9,7 @@
 //!   1 write(ptr, len)       escribe bytes en la consola
 //!   2 sleep_ms(ms)          duerme sin consumir CPU
 //!   3 getpid()              id del proceso
+//!   4 uptime_ms()          milisegundos desde el arranque
 
 use crate::{cpu, paging, scheduler, serial, timer};
 use core::arch::global_asm;
@@ -87,6 +88,7 @@ extern "C" fn syscall_dispatch(nr: u64, a0: u64, a1: u64, _a2: u64) -> i64 {
             0
         }
         3 => scheduler::current_id() as i64,
+        4 => timer::uptime_ms() as i64,
         _ => ENOSYS,
     }
 }

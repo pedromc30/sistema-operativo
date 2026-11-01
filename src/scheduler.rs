@@ -36,6 +36,8 @@ struct Task {
     kstack_top: u64,  // cima de su pila de kernel (TSS.rsp0 y pila de syscall)
     user_rip: u64,    // dónde empieza a ejecutar en modo usuario
     user_rsp: u64,    // su pila de usuario
+    user_arg0: u64,   // valores iniciales de rdi y rsi al entrar a modo usuario
+    user_arg1: u64,
 }
 
 struct Scheduler {
@@ -112,6 +114,8 @@ pub fn init() {
             kstack_top: 0,
             user_rip: 0,
             user_rsp: 0,
+            user_arg0: 0,
+            user_arg1: 0,
         }));
         s.current = 0;
         s.kernel_cr3 = paging::read_cr3() & !0xfff;
@@ -133,17 +137,33 @@ fn idle_loop() {
 
 /// Crea una tarea de kernel que ejecutará `entry`. Devuelve su id.
 pub fn spawn(name: &str, entry: fn()) -> u64 {
-    spawn_with(name, entry, 0, 0, 0)
+    spawn_with(name, entry, 0, 0, 0, 0, 0)
 }
 
 /// Crea una tarea que, al arrancar, ejecuta `entry` (en modo kernel) con el espacio
 /// de direcciones `cr3` (0 = el del kernel). Para procesos de usuario, `entry` salta
 /// a modo usuario en `user_rip` con la pila `user_rsp`.
-pub fn spawn_user(name: &str, entry: fn(), cr3: u64, user_rip: u64, user_rsp: u64) -> u64 {
-    spawn_with(name, entry, cr3, user_rip, user_rsp)
+pub fn spawn_user(
+    name: &str,
+    entry: fn(),
+    cr3: u64,
+    user_rip: u64,
+    user_rsp: u64,
+    arg0: u64,
+    arg1: u64,
+) -> u64 {
+    spawn_with(name, entry, cr3, user_rip, user_rsp, arg0, arg1)
 }
 
-fn spawn_with(name: &str, entry: fn(), cr3: u64, user_rip: u64, user_rsp: u64) -> u64 {
+fn spawn_with(
+    name: &str,
+    entry: fn(),
+    cr3: u64,
+    user_rip: u64,
+    user_rsp: u64,
+    user_arg0: u64,
+    user_arg1: u64,
+) -> u64 {
     cpu::without_interrupts(|| {
         let s = sched();
         let mut stack = vec![0u8; STACK_SIZE];
@@ -177,6 +197,8 @@ fn spawn_with(name: &str, entry: fn(), cr3: u64, user_rip: u64, user_rsp: u64) -
             kstack_top: top as u64,
             user_rip,
             user_rsp,
+            user_arg0,
+            user_arg1,
         }));
         id
     })
@@ -423,15 +445,15 @@ pub fn current_id() -> u64 {
     sched().current
 }
 
-/// (rip, rsp) de usuario de la tarea actual.
-pub fn current_user_entry() -> (u64, u64) {
+/// (rip, rsp, arg0, arg1) de usuario de la tarea actual.
+pub fn current_user_entry() -> (u64, u64, u64, u64) {
     cpu::without_interrupts(|| {
         let s = sched();
         let cur = s.current;
         s.tasks
             .iter()
             .find(|t| t.id == cur)
-            .map(|t| (t.user_rip, t.user_rsp))
-            .unwrap_or((0, 0))
+            .map(|t| (t.user_rip, t.user_rsp, t.user_arg0, t.user_arg1))
+            .unwrap_or((0, 0, 0, 0))
     })
 }

@@ -4,3 +4,5 @@ iso_root/
 *.iso
 esp/
 ovmf_vars.fd
+initrd/
+user/target/

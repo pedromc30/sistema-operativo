@@ -1,0 +1,11 @@
+[package]
+name = "user"
+version = "0.1.0"
+edition = "2021"
+
+# Proyecto independiente del kernel (no forma parte de ningún workspace).
+[workspace]
+
+[profile.release]
+panic = "abort"
+opt-level = 2
