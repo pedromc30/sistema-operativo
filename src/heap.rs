@@ -90,8 +90,8 @@ impl FreeList {
     }
 }
 
-/// Envoltorio para poder tener un `static`. OJO: no hay cerrojo; es correcto
-/// solo mientras haya un único hilo y los manejadores de interrupción no reserven memoria.
+/// Envoltorio para poder tener un `static`. La exclusión mutua se consigue
+/// desactivando interrupciones durante alloc/dealloc (válido en un solo núcleo).
 pub struct Heap(UnsafeCell<FreeList>);
 unsafe impl Sync for Heap {}
 
@@ -100,16 +100,16 @@ static ALLOCATOR: Heap = Heap(UnsafeCell::new(FreeList { head: null_mut() }));
 
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        (*self.0.get()).alloc(layout)
+        crate::cpu::without_interrupts(|| (*self.0.get()).alloc(layout))
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let size = align_up(layout.size().max(NODE), NODE);
-        (*self.0.get()).insert(ptr as usize, size);
+        crate::cpu::without_interrupts(|| (*self.0.get()).insert(ptr as usize, size));
     }
 }
 
 pub fn free_bytes() -> usize {
-    unsafe { (*ALLOCATOR.0.get()).free_bytes() }
+    crate::cpu::without_interrupts(|| unsafe { (*ALLOCATOR.0.get()).free_bytes() })
 }
 
 /// Mapea la región del heap con frames del PMM y arranca el allocator.

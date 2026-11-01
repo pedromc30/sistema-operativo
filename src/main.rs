@@ -5,6 +5,7 @@ extern crate alloc;
 
 #[macro_use]
 mod serial;
+mod cpu;
 mod gdt;
 mod heap;
 mod idt;
@@ -15,6 +16,7 @@ mod paging;
 mod pic;
 mod pmm;
 mod port;
+mod scheduler;
 mod shell;
 mod timer;
 
@@ -77,6 +79,7 @@ fn timer_demo() {
     println!("--- Temporizador (PIT -> IRQ0 -> vector 32) ---");
     unsafe {
         pic::init();
+        scheduler::init(); // el hilo actual pasa a ser la tarea 0 (shell)
         timer::init();
         pic::unmask(1); // teclado PS/2
         pic::unmask(4); // puerto serie (COM1)

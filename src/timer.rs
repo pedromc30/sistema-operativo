@@ -40,10 +40,11 @@ pub fn uptime_ms() -> u64 {
     ticks() * 1000 / HZ
 }
 
-/// Espera sin gastar CPU: `hlt` detiene el procesador hasta la siguiente interrupción.
+/// Espera cediendo la CPU a otras tareas; si no hay nadie más, `hlt` la duerme hasta la próxima interrupción.
 pub fn sleep_ms(ms: u64) {
     let target = ticks() + (ms * HZ + 999) / 1000;
     while ticks() < target {
+        crate::scheduler::yield_now(); // deja correr a otras tareas
         unsafe { asm!("hlt", options(nomem, nostack)) };
     }
 }

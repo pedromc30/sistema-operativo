@@ -179,7 +179,14 @@ extern "C" fn exception_handler(f: &mut Frame) {
     if f.vector >= 32 {
         let irq = (f.vector - 32) as u8;
         match irq {
-            0 => crate::timer::on_tick(),
+            0 => {
+                crate::timer::on_tick();
+                // EOI ANTES de planificar: si cambiamos de tarea sin avisar al PIC,
+                // éste no volvería a mandar ticks.
+                crate::pic::eoi(irq);
+                crate::scheduler::preempt();
+                return;
+            }
             1 => crate::keyboard::on_irq(),
             4 => crate::serial::on_rx(),
             _ => println!("IRQ {} inesperada", irq),

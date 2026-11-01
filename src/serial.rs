@@ -50,7 +50,10 @@ impl Write for Serial {
 }
 
 pub fn _print(args: fmt::Arguments) {
-    let _ = Serial.write_fmt(args);
+    // Con interrupciones desactivadas para que las líneas de tareas distintas no se mezclen.
+    crate::cpu::without_interrupts(|| {
+        let _ = Serial.write_fmt(args);
+    });
 }
 
 macro_rules! print {
