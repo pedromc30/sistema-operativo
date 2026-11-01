@@ -1,11 +1,15 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 #[macro_use]
 mod serial;
 mod gdt;
+mod heap;
 mod idt;
 mod limine;
+mod paging;
 mod pmm;
 
 use core::arch::asm;
@@ -38,6 +42,7 @@ extern "C" fn _start() -> ! {
     println!("[ok] volvimos del breakpoint: las excepciones funcionan");
 
     memory_demo();
+    heap_demo();
 
     // Pruebas de fallos reales (se activan con --features, ver run.sh).
     #[cfg(feature = "crash-pf")]
@@ -58,6 +63,73 @@ extern "C" fn _start() -> ! {
     }
 
     halt();
+}
+
+fn heap_demo() {
+    use alloc::{boxed::Box, string::String, vec::Vec};
+
+    println!();
+    println!("--- Paginacion ---");
+    let hhdm = limine::hhdm_offset().unwrap();
+    println!("CR3 (tabla raiz) = {:#x}   NX activo: {}", paging::read_cr3(), paging::nx_enabled());
+    println!("translate(HHDM + 0x1000)   = {:?}", paging::translate(hhdm + 0x1000));
+    println!("translate(0xdeadbeef000)   = {:?}", paging::translate(0xdead_beef_000));
+    println!("translate(heap, antes)     = {:?}", paging::translate(heap::HEAP_START));
+
+    let frames_before = pmm::free_frames();
+    unsafe { heap::init() };
+    println!("heap mapeado: {} KiB en {:#x}  (frames usados: {} = paginas + tablas nuevas)",
+        heap::HEAP_SIZE / 1024, heap::HEAP_START, frames_before - pmm::free_frames());
+    println!("translate(heap, despues)   = {:?}", paging::translate(heap::HEAP_START));
+    println!("translate(heap + 1 MiB)    = {:?}  (justo fuera: sin mapear)",
+        paging::translate(heap::HEAP_START + heap::HEAP_SIZE));
+
+    println!();
+    println!("--- Heap: Box, Vec, String ---");
+    let libre0 = heap::free_bytes();
+    println!("heap libre al inicio: {} bytes", libre0);
+
+    let caja = Box::new(0x1234_5678_u64);
+    println!("Box<u64> en {:p} = {:#x}", &*caja, *caja);
+
+    let mut v: Vec<u64> = Vec::new();
+    for i in 0..1000 { v.push(i * i); }
+    let suma: u64 = v.iter().sum();
+    println!("Vec con {} elementos, suma de cuadrados = {} (esperado 332833500)", v.len(), suma);
+    assert_eq!(suma, 332_833_500);
+
+    let texto = alloc::format!("{} + {} = {}", 2, 3, 2 + 3);
+    let mut s = String::from("RustOS");
+    s.push_str(" con heap: ");
+    s.push_str(&texto);
+    println!("String: {}", s);
+
+    #[repr(align(64))]
+    struct Alineado(#[allow(dead_code)] u8);
+    let al = Box::new(Alineado(1));
+    let dir = &*al as *const Alineado as usize;
+    println!("alineacion 64: direccion {:#x} -> {}", dir, if dir % 64 == 0 { "OK" } else { "MAL" });
+
+    println!("heap libre con todo vivo: {} bytes", heap::free_bytes());
+    drop(caja); drop(v); drop(s); drop(al); drop(texto);
+    println!("heap libre tras liberar:  {} bytes -> {}", heap::free_bytes(),
+        if heap::free_bytes() == libre0 { "OK, sin fugas y bloques fusionados" } else { "FUGA o fragmentacion" });
+
+    // Pedir mas de lo que cabe debe FALLAR de forma controlada, no colgar el kernel.
+    let mut grande: Vec<u8> = Vec::new();
+    match grande.try_reserve(2 * 1024 * 1024) {
+        Ok(_) => println!("ERROR: reservo 2 MiB en un heap de 1 MiB"),
+        Err(_) => println!("reservar 2 MiB falla correctamente (heap de 1 MiB)"),
+    }
+    let mut mediano: Vec<u8> = Vec::new();
+    mediano.try_reserve(512 * 1024).expect("512 KiB deberian caber");
+    println!("reservar 512 KiB funciona (capacidad {} KiB)", mediano.capacity() / 1024);
+
+    #[cfg(feature = "crash-heap")]
+    unsafe {
+        println!("Leyendo justo despues del heap (sin mapear)...");
+        let _ = core::ptr::read_volatile((heap::HEAP_START + heap::HEAP_SIZE) as *const u8);
+    }
 }
 
 fn memory_demo() {
