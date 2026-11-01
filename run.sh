@@ -18,4 +18,4 @@ exec timeout "${TIMEOUT:-0}" qemu-system-x86_64 -machine q35 -m 256M \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file=ovmf_vars.fd \
   -drive format=raw,file=fat:rw:esp \
-  -serial stdio -display none -no-reboot
+  -serial stdio -display "${QEMU_DISPLAY:-none}" -no-reboot ${QEMU_EXTRA:-}

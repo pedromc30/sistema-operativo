@@ -18,6 +18,22 @@ pub fn init() {
     }
 }
 
+/// Activa la interrupción "dato recibido" del UART (IRQ4).
+pub fn enable_rx() {
+    unsafe { outb(COM1 + 1, 0x01) };
+}
+
+/// Llamada desde la IRQ4: vacía los bytes recibidos hacia la cola de entrada.
+pub fn on_rx() {
+    unsafe {
+        while inb(COM1 + 5) & 1 != 0 {
+            let b = inb(COM1);
+            // Las terminales mandan \r al pulsar Enter.
+            crate::input::push(if b == b'\r' { b'\n' } else { b });
+        }
+    }
+}
+
 pub struct Serial;
 
 impl Write for Serial {

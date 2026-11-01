@@ -8,11 +8,14 @@ mod serial;
 mod gdt;
 mod heap;
 mod idt;
+mod input;
+mod keyboard;
 mod limine;
 mod paging;
 mod pic;
 mod pmm;
 mod port;
+mod shell;
 mod timer;
 
 use core::arch::asm;
@@ -66,8 +69,7 @@ extern "C" fn _start() -> ! {
     }
 
     timer_demo();
-
-    halt();
+    shell::run();
 }
 
 fn timer_demo() {
@@ -76,15 +78,18 @@ fn timer_demo() {
     unsafe {
         pic::init();
         timer::init();
+        pic::unmask(1); // teclado PS/2
+        pic::unmask(4); // puerto serie (COM1)
+        serial::enable_rx();
         asm!("sti"); // a partir de aquí la CPU acepta interrupciones de hardware
     }
     println!("interrupciones activadas, {} Hz (1 tick = {} ms)", timer::HZ, 1000 / timer::HZ);
     let t0 = timer::ticks();
-    for s in 1..=5 {
+    for s in 1..=3 {
         timer::sleep_ms(1000);
         println!("uptime: {} s  (ticks={}, {} ms)", s, timer::ticks(), timer::uptime_ms());
     }
-    println!("5 s esperados -> {} ticks (esperado ~500)", timer::ticks() - t0);
+    println!("3 s esperados -> {} ticks (esperado ~300)", timer::ticks() - t0);
 }
 
 fn heap_demo() {

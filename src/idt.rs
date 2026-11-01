@@ -180,6 +180,8 @@ extern "C" fn exception_handler(f: &mut Frame) {
         let irq = (f.vector - 32) as u8;
         match irq {
             0 => crate::timer::on_tick(),
+            1 => crate::keyboard::on_irq(),
+            4 => crate::serial::on_rx(),
             _ => println!("IRQ {} inesperada", irq),
         }
         crate::pic::eoi(irq);
