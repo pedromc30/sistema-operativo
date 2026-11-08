@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 ( cd user && RUSTFLAGS="-C relocation-model=static" cargo build --release )
 mkdir -p initrd && rm -f initrd/*
 cp rootfs/* initrd/
-for p in hello primes crash; do cp "user/target/x86_64-unknown-none/release/$p" "initrd/$p"; done
+for p in hello primes crash sh memtest launcher badcalls bomb; do cp "user/target/x86_64-unknown-none/release/$p" "initrd/$p"; done
 
 # 2) Kernel (incrusta initrd/ al compilar)
 cargo build ${FEATURES:+--features "$FEATURES"}

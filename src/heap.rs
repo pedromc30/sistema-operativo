@@ -9,7 +9,10 @@ use core::mem::size_of;
 use core::ptr::null_mut;
 
 pub const HEAP_START: u64 = 0xffff_c000_0000_0000;
-pub const HEAP_SIZE: u64 = 1024 * 1024; // 1 MiB (fijo por ahora)
+/// Cada tarea usa 32 KiB de este heap para su pila de kernel, y se permiten
+/// `process::MAX_TASKS` tareas: el heap debe tener holgura de sobra para eso.
+/// La opción `small-heap` lo reduce a 1 MiB para probar el caso de memoria agotada.
+pub const HEAP_SIZE: u64 = if cfg!(feature = "small-heap") { 1024 * 1024 } else { 4 * 1024 * 1024 };
 
 /// Cabecera de un bloque LIBRE; vive dentro del propio bloque.
 #[repr(C)]

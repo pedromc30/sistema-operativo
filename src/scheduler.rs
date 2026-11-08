@@ -6,7 +6,7 @@
 //! tick, así que ninguna tarea necesita ceder la CPU voluntariamente.
 
 use crate::{cpu, gdt, paging, syscall};
-use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::arch::{asm, global_asm};
 
 const STACK_SIZE: usize = 32 * 1024;
@@ -19,6 +19,7 @@ enum State {
     Running,
     Sleeping(u64), // dormida hasta que el reloj llegue a este tick
     WaitInput,     // bloqueada esperando una tecla
+    WaitExit(u64), // bloqueada esperando a que termine el proceso con este id
     Dead,
 }
 
@@ -38,6 +39,8 @@ struct Task {
     user_rsp: u64,    // su pila de usuario
     user_arg0: u64,   // valores iniciales de rdi y rsi al entrar a modo usuario
     user_arg1: u64,
+    brk_start: u64,   // base del heap de usuario (brk)
+    brk_cur: u64,     // fin actual del heap de usuario
 }
 
 struct Scheduler {
@@ -45,9 +48,10 @@ struct Scheduler {
     current: u64,          // id de la tarea en ejecución
     next_id: u64,
     kernel_cr3: u64,       // tablas de páginas del kernel (las de Limine)
+    exit_codes: Vec<(u64, i64)>, // (id, código) de procesos terminados que nadie ha recogido aún
 }
 
-static mut SCHED: Scheduler = Scheduler { tasks: Vec::new(), current: 0, next_id: 1, kernel_cr3: 0 };
+static mut SCHED: Scheduler = Scheduler { tasks: Vec::new(), current: 0, next_id: 1, kernel_cr3: 0, exit_codes: Vec::new() };
 
 fn sched() -> &'static mut Scheduler {
     unsafe { &mut *(&raw mut SCHED) }
@@ -116,12 +120,14 @@ pub fn init() {
             user_rsp: 0,
             user_arg0: 0,
             user_arg1: 0,
+            brk_start: 0,
+            brk_cur: 0,
         }));
         s.current = 0;
         s.kernel_cr3 = paging::read_cr3() & !0xfff;
     });
     // Tarea ociosa: ocupa la CPU cuando todas las demás están bloqueadas.
-    let id = spawn("idle", idle_loop);
+    let id = spawn("idle", idle_loop).expect("sin memoria para la tarea idle");
     cpu::without_interrupts(|| {
         if let Some(t) = sched().tasks.iter_mut().find(|t| t.id == id) {
             t.idle = true;
@@ -135,8 +141,8 @@ fn idle_loop() {
     }
 }
 
-/// Crea una tarea de kernel que ejecutará `entry`. Devuelve su id.
-pub fn spawn(name: &str, entry: fn()) -> u64 {
+/// Crea una tarea de kernel que ejecutará `entry`. Devuelve su id, o `None` si no hay memoria.
+pub fn spawn(name: &str, entry: fn()) -> Option<u64> {
     spawn_with(name, entry, 0, 0, 0, 0, 0)
 }
 
@@ -151,7 +157,7 @@ pub fn spawn_user(
     user_rsp: u64,
     arg0: u64,
     arg1: u64,
-) -> u64 {
+) -> Option<u64> {
     spawn_with(name, entry, cr3, user_rip, user_rsp, arg0, arg1)
 }
 
@@ -163,10 +169,15 @@ fn spawn_with(
     user_rsp: u64,
     user_arg0: u64,
     user_arg1: u64,
-) -> u64 {
+) -> Option<u64> {
     cpu::without_interrupts(|| {
         let s = sched();
-        let mut stack = vec![0u8; STACK_SIZE];
+        // Reserva FALLIBLE: si un programa de usuario agota la memoria, spawn debe fallar
+        // con un error, no provocar un pánico del kernel.
+        let mut stack: Vec<u8> = Vec::new();
+        stack.try_reserve_exact(STACK_SIZE).ok()?;
+        stack.resize(STACK_SIZE, 0);
+        s.tasks.try_reserve(1).ok()?;
         stack[..8].copy_from_slice(&CANARY.to_le_bytes());
 
         // Fabricamos la pila como si la tarea ya hubiera sido interrumpida dentro
@@ -199,8 +210,10 @@ fn spawn_with(
             user_rsp,
             user_arg0,
             user_arg1,
+            brk_start: crate::process::USER_HEAP_BASE,
+            brk_cur: crate::process::USER_HEAP_BASE,
         }));
-        id
+        Some(id)
     })
 }
 
@@ -386,8 +399,14 @@ extern "C" fn thread_start() -> ! {
     exit_current()
 }
 
-/// Termina la tarea actual (la marca muerta y cambia a otra; no vuelve).
+/// Termina la tarea actual con código 0.
 pub fn exit_current() -> ! {
+    exit_with(0)
+}
+
+/// Termina la tarea actual: la marca muerta, guarda su código de salida, despierta a
+/// quien la espere y cambia a otra tarea. No vuelve.
+pub fn exit_with(code: i64) -> ! {
     cpu::without_interrupts(|| {
         let s = sched();
         let cur = s.current;
@@ -396,11 +415,76 @@ pub fn exit_current() -> ! {
                 t.state = State::Dead;
             }
         }
+        // Guardar el código hasta que alguien lo recoja con wait (solo los 64 últimos).
+        if s.exit_codes.len() >= 64 {
+            s.exit_codes.remove(0);
+        }
+        s.exit_codes.push((cur, code));
+        for t in s.tasks.iter_mut() {
+            if t.state == State::WaitExit(cur) {
+                t.state = State::Ready;
+            }
+        }
         unsafe { schedule() }; // no vuelve: nadie reanuda una tarea muerta
     });
     loop {
         unsafe { asm!("hlt") };
     }
+}
+
+pub const ECHILD: i64 = -10;
+
+/// Espera a que termine el proceso `pid` y devuelve su código de salida. Si ya había
+/// terminado, devuelve el código guardado sin esperar. `ECHILD` si no existe (o ya se
+/// recogió). La comprobación y el bloqueo van juntos con interrupciones desactivadas
+/// para que el aviso de salida no se pierda.
+pub fn wait_for_exit(pid: u64) -> i64 {
+    loop {
+        let r = cpu::without_interrupts(|| {
+            let s = sched();
+            if let Some(i) = s.exit_codes.iter().position(|(p, _)| *p == pid) {
+                return Some(s.exit_codes.remove(i).1);
+            }
+            let alive = s.tasks.iter().any(|t| t.id == pid && t.state != State::Dead);
+            if pid == s.current || !alive {
+                return Some(ECHILD);
+            }
+            let cur = s.current;
+            for t in s.tasks.iter_mut() {
+                if t.id == cur {
+                    t.state = State::WaitExit(pid);
+                }
+            }
+            unsafe { schedule() };
+            None // nos han despertado: volver a mirar la tabla
+        });
+        if let Some(code) = r {
+            return code;
+        }
+    }
+}
+
+pub fn task_count() -> usize {
+    cpu::without_interrupts(|| sched().tasks.len())
+}
+
+/// (base, fin actual) del heap de usuario de la tarea actual.
+pub fn brk_info() -> (u64, u64) {
+    cpu::without_interrupts(|| {
+        let s = sched();
+        let cur = s.current;
+        s.tasks.iter().find(|t| t.id == cur).map(|t| (t.brk_start, t.brk_cur)).unwrap_or((0, 0))
+    })
+}
+
+pub fn set_brk(new: u64) {
+    cpu::without_interrupts(|| {
+        let s = sched();
+        let cur = s.current;
+        if let Some(t) = s.tasks.iter_mut().find(|t| t.id == cur) {
+            t.brk_cur = new;
+        }
+    })
 }
 
 pub struct TaskInfo {
@@ -424,6 +508,7 @@ pub fn list() -> Vec<TaskInfo> {
                     State::Running => "ejecutando",
                     State::Sleeping(_) => "durmiendo",
                     State::WaitInput => "esp.entrada",
+                    State::WaitExit(_) => "esp.hijo",
                     State::Dead => "terminada",
                 },
                 ticks: t.ticks,

@@ -72,6 +72,22 @@ fn run_program(prog: &str, args: &str) {
     }
 }
 
+/// Como `run`, pero en PRIMER PLANO: el shell se bloquea hasta que el programa termina
+/// (y por tanto no compite con él por el teclado) y muestra su código de salida.
+fn exec_program(prog: &str, args: &str) {
+    let Some(data) = fs::find(prog) else {
+        println!("no existe '{}' en el initrd (usa 'ls')", prog);
+        return;
+    };
+    match process::spawn_elf(prog, data, args) {
+        Ok(id) => {
+            let code = scheduler::wait_for_exit(id);
+            println!("[proceso {} ('{}') termino con codigo {}]", id, prog, code);
+        }
+        Err(e) => println!("no se pudo ejecutar '{}': {}", prog, e),
+    }
+}
+
 /// Prueba el cargador con ELF corruptos: todos deben rechazarse SIN dejar fugas de memoria.
 fn elf_test() {
     let Some(good) = fs::find("hello") else {
@@ -177,6 +193,8 @@ pub fn run() -> ! {
                 println!("  ps            lista las tareas");
                 println!("  spawn <nombre> crea una tarea que cuenta durante 5 s (usa CPU)");
                 println!("  sleeper <nombre> crea una tarea que duerme entre mensajes (no usa CPU)");
+                println!("  sh            lanza el shell de ESPACIO DE USUARIO (escribe exit para volver)");
+                println!("  exec <p> [a]  como run, pero espera a que termine y muestra su codigo de salida");
                 println!("  ls            lista los archivos del initrd");
                 println!("  cat <archivo> muestra un archivo de texto");
                 println!("  run <prog> [args] ejecuta un programa en modo usuario (ELF del initrd o interno)");
@@ -203,16 +221,23 @@ pub fn run() -> ! {
                 }
             }
             ["spawn", name] => {
-                let id = scheduler::spawn(name, worker);
-                println!("tarea '{}' creada (id {})", name, id);
+                match scheduler::spawn(name, worker) {
+                    Some(id) => println!("tarea '{}' creada (id {})", name, id),
+                    None => println!("sin memoria para crear la tarea"),
+                }
             }
             ["spawn"] => println!("uso: spawn <nombre>"),
             ["sleeper", name] => {
-                let id = scheduler::spawn(name, sleeper);
-                println!("tarea '{}' creada (id {}): duerme 1 s entre mensajes", name, id);
+                match scheduler::spawn(name, sleeper) {
+                    Some(id) => println!("tarea '{}' creada (id {}): duerme 1 s entre mensajes", name, id),
+                    None => println!("sin memoria para crear la tarea"),
+                }
             }
             ["run", prog, rest @ ..] => run_program(prog, &rest.join(" ")),
             ["run"] => println!("uso: run <programa> [argumentos]   (ver 'ls')"),
+            ["exec", prog, rest @ ..] => exec_program(prog, &rest.join(" ")),
+            ["exec"] => println!("uso: exec <programa> [argumentos]  (como run, pero espera a que termine)"),
+            ["sh"] => exec_program("sh", ""),
             ["ls"] => {
                 println!("{:<14} {:>8}", "ARCHIVO", "BYTES");
                 for (name, size) in fs::list() {

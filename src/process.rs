@@ -7,6 +7,11 @@ pub const USER_CODE: u64 = 0x40_0000; // 4 MiB
 pub const USER_STACK_TOP: u64 = 0x80_0000; // 8 MiB (la pila crece hacia abajo)
 const USER_STACK_PAGES: u64 = 8;
 pub const MAX_ARGS: usize = 256;
+pub const USER_HEAP_BASE: u64 = 0x1000_0000; // 256 MiB: lejos del programa y de la pila
+pub const USER_HEAP_MAX: u64 = 32 * 1024 * 1024; // 32 MiB como máximo por proceso
+/// Límite de tareas. Con `small-heap` se sube a propósito por encima de lo que cabe en el
+/// heap, para poder probar que agotar la memoria produce un error y no un pánico.
+pub const MAX_TASKS: usize = if cfg!(feature = "small-heap") { 64 } else { 32 };
 const PAGE: u64 = 4096;
 
 /// Crea un proceso a partir de código máquina plano (los programas en ensamblador
@@ -15,7 +20,15 @@ pub fn spawn_raw(name: &str, code: &[u8]) -> Result<u64, &'static str> {
     let root = paging::new_address_space().ok_or("sin memoria para el espacio de direcciones")?;
     let r = unsafe { build_flat_image(root, code).and_then(|_| build_stack(root, "")) };
     match r {
-        Ok((rsp, a0, a1)) => Ok(scheduler::spawn_user(name, user_task_main, root, USER_CODE, rsp, a0, a1)),
+        Ok((rsp, a0, a1)) => {
+            match scheduler::spawn_user(name, user_task_main, root, USER_CODE, rsp, a0, a1) {
+                Some(id) => Ok(id),
+                None => {
+                    unsafe { paging::destroy_address_space(root) };
+                    Err("sin memoria para la pila del kernel")
+                }
+            }
+        }
         Err(e) => {
             unsafe { paging::destroy_address_space(root) }; // deshace lo ya mapeado
             Err(e)
@@ -30,6 +43,9 @@ pub fn spawn_elf(name: &str, elf_bytes: &[u8], args: &str) -> Result<u64, alloc:
     if args.len() > MAX_ARGS {
         return Err(String::from("argumentos demasiado largos"));
     }
+    if scheduler::task_count() >= MAX_TASKS {
+        return Err(String::from("demasiados procesos"));
+    }
     let root = paging::new_address_space().ok_or_else(|| String::from("sin memoria"))?;
     let r = unsafe { elf::load(root, elf_bytes) };
     let entry = match r {
@@ -40,7 +56,15 @@ pub fn spawn_elf(name: &str, elf_bytes: &[u8], args: &str) -> Result<u64, alloc:
         }
     };
     match unsafe { build_stack(root, args) } {
-        Ok((rsp, a0, a1)) => Ok(scheduler::spawn_user(name, user_task_main, root, entry, rsp, a0, a1)),
+        Ok((rsp, a0, a1)) => {
+            match scheduler::spawn_user(name, user_task_main, root, entry, rsp, a0, a1) {
+                Some(id) => Ok(id),
+                None => {
+                    unsafe { paging::destroy_address_space(root) };
+                    Err(String::from("sin memoria"))
+                }
+            }
+        }
         Err(e) => {
             unsafe { paging::destroy_address_space(root) };
             Err(String::from(e))

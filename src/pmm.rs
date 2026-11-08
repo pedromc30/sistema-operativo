@@ -80,8 +80,12 @@ pub unsafe fn init() {
 }
 
 /// Reserva un frame y devuelve su dirección FÍSICA.
+///
+/// Se ejecuta con las interrupciones desactivadas: el planificador también libera
+/// frames (al destruir procesos) desde una interrupción, y sin esto una expropiación en
+/// mitad de la operación podría corromper el bitmap.
 pub fn alloc_frame() -> Option<u64> {
-    unsafe {
+    crate::cpu::without_interrupts(|| unsafe {
         let p = &mut *(&raw mut PMM);
         for i in 0..p.frames {
             let f = (p.hint + i) % p.frames;
@@ -93,19 +97,19 @@ pub fn alloc_frame() -> Option<u64> {
             }
         }
         None
-    }
+    })
 }
 
-/// Devuelve un frame al gestor.
+/// Devuelve un frame al gestor (también con interrupciones desactivadas).
 pub fn free_frame(phys: u64) {
-    unsafe {
+    crate::cpu::without_interrupts(|| unsafe {
         let p = &mut *(&raw mut PMM);
         let f = phys / FRAME_SIZE;
         assert!(f < p.frames && p.is_used(f), "free_frame: frame invalido o ya libre");
         p.set(f, false);
         p.free += 1;
         if f < p.hint { p.hint = f; }
-    }
+    })
 }
 
 pub fn free_frames() -> u64 { unsafe { (*(&raw const PMM)).free } }

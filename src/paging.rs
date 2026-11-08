@@ -172,7 +172,8 @@ pub unsafe fn destroy_address_space(root: u64) {
 }
 
 /// ¿Puede el modo usuario acceder a `virt` (presente y USER en todos los niveles)?
-fn user_accessible(virt: u64) -> bool {
+/// Con `write`, además la página final debe ser escribible.
+fn user_accessible(virt: u64, write: bool) -> bool {
     if virt >= 0x0000_8000_0000_0000 {
         return false; // mitad alta: del kernel
     }
@@ -183,7 +184,7 @@ fn user_accessible(virt: u64) -> bool {
             return false;
         }
         if level == 1 || (level <= 3 && e & HUGE != 0) {
-            return true;
+            return !write || e & WRITABLE != 0;
         }
         tbl = e & ADDR_MASK;
     }
@@ -194,16 +195,49 @@ fn user_accessible(virt: u64) -> bool {
 /// memoria de usuario mapeada. Si no se hiciera, el kernel podría leer memoria suya
 /// (o fallar él mismo) por orden de un programa malicioso.
 pub fn user_range_ok(ptr: u64, len: u64) -> bool {
+    user_range(ptr, len, false)
+}
+
+/// Igual, pero para memoria donde el kernel va a ESCRIBIR: además debe ser escribible.
+pub fn user_range_writable(ptr: u64, len: u64) -> bool {
+    user_range(ptr, len, true)
+}
+
+fn user_range(ptr: u64, len: u64, write: bool) -> bool {
     if len == 0 {
         return true;
     }
     let Some(end) = ptr.checked_add(len) else { return false };
     let mut page = ptr & !(PAGE - 1);
     while page < end {
-        if !user_accessible(page) {
+        if !user_accessible(page, write) {
             return false;
         }
         page += PAGE;
     }
     true
+}
+
+/// Quita el mapeo de una página (4 KiB) del espacio de direcciones ACTUAL y devuelve el
+/// frame físico que tenía, para que quien llama decida qué hacer con él.
+///
+/// # Safety
+/// `virt` alineada a 4 KiB.
+pub unsafe fn unmap_page(virt: u64) -> Option<u64> {
+    let mut tbl = read_cr3() & ADDR_MASK;
+    for level in (2..=4).rev() {
+        let e = *table(tbl).add(index(virt, level));
+        if e & PRESENT == 0 || e & HUGE != 0 {
+            return None;
+        }
+        tbl = e & ADDR_MASK;
+    }
+    let leaf = table(tbl).add(index(virt, 1));
+    let e = *leaf;
+    if e & PRESENT == 0 {
+        return None;
+    }
+    *leaf = 0;
+    asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+    Some(e & ADDR_MASK)
 }

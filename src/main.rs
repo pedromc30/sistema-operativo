@@ -117,7 +117,7 @@ fn heap_demo() {
     println!("heap mapeado: {} KiB en {:#x}  (frames usados: {} = paginas + tablas nuevas)",
         heap::HEAP_SIZE / 1024, heap::HEAP_START, frames_before - pmm::free_frames());
     println!("translate(heap, despues)   = {:?}", paging::translate(heap::HEAP_START));
-    println!("translate(heap + 1 MiB)    = {:?}  (justo fuera: sin mapear)",
+    println!("translate(heap + tamano) = {:?}  (justo fuera: sin mapear)",
         paging::translate(heap::HEAP_START + heap::HEAP_SIZE));
 
     println!();
@@ -153,13 +153,14 @@ fn heap_demo() {
 
     // Pedir mas de lo que cabe debe FALLAR de forma controlada, no colgar el kernel.
     let mut grande: Vec<u8> = Vec::new();
-    match grande.try_reserve(2 * 1024 * 1024) {
-        Ok(_) => println!("ERROR: reservo 2 MiB en un heap de 1 MiB"),
-        Err(_) => println!("reservar 2 MiB falla correctamente (heap de 1 MiB)"),
+    let tam = heap::HEAP_SIZE as usize;
+    match grande.try_reserve(2 * tam) {
+        Ok(_) => println!("ERROR: reservo {} KiB en un heap de {} KiB", 2 * tam / 1024, tam / 1024),
+        Err(_) => println!("reservar {} KiB falla correctamente (heap de {} KiB)", 2 * tam / 1024, tam / 1024),
     }
     let mut mediano: Vec<u8> = Vec::new();
-    mediano.try_reserve(512 * 1024).expect("512 KiB deberian caber");
-    println!("reservar 512 KiB funciona (capacidad {} KiB)", mediano.capacity() / 1024);
+    mediano.try_reserve(tam / 2).expect("la mitad del heap deberia caber");
+    println!("reservar {} KiB funciona (capacidad {} KiB)", tam / 2 / 1024, mediano.capacity() / 1024);
 
     #[cfg(feature = "crash-heap")]
     unsafe {

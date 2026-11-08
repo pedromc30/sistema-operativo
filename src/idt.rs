@@ -213,7 +213,8 @@ extern "C" fn exception_handler(f: &mut Frame) {
         // exit_current() no vuelve: hay que liberar a mano lo que tengamos en el heap,
         // porque sus destructores nunca se ejecutarían.
         drop(extra);
-        crate::scheduler::exit_current();
+        // Código de salida 128 + nº de excepción (convención de los shells para "muerto por señal").
+        crate::scheduler::exit_with(128 + f.vector as i64);
     }
 
     // El breakpoint es una "trampa": se puede continuar tras ella.
