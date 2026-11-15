@@ -8,7 +8,7 @@ use crate::{input_ready, print, println, read, sleep_ms};
 use alloc::{string::String, vec::Vec};
 
 enum Key {
-    Char(u8),
+    Char(char),
     Up,
     Down,
     Left,
@@ -34,8 +34,24 @@ fn next_byte_soon() -> Option<u8> {
 
 fn read_key() -> Option<Key> {
     let c = next_byte()?;
-    if c != 0x1b {
-        return Some(Key::Char(c));
+    if c < 0x80 && c != 0x1b {
+        return Some(Key::Char(c as char));
+    }
+    if c >= 0x80 {
+        // Carácter UTF-8 de varios bytes (ñ, á, €...)
+        let (mut acc, need) = match c {
+            0xC2..=0xDF => ((c & 0x1F) as u32, 1),
+            0xE0..=0xEF => ((c & 0x0F) as u32, 2),
+            0xF0..=0xF4 => ((c & 0x07) as u32, 3),
+            _ => return Some(Key::Ignored),
+        };
+        for _ in 0..need {
+            match next_byte_soon() {
+                Some(b) if b & 0xC0 == 0x80 => acc = (acc << 6) | (b & 0x3F) as u32,
+                _ => return Some(Key::Ignored),
+            }
+        }
+        return Some(char::from_u32(acc).map(Key::Char).unwrap_or(Key::Ignored));
     }
     match next_byte_soon() {
         Some(b'[') | Some(b'O') => {}
@@ -84,7 +100,7 @@ pub fn readline(prompt: &str, history: &mut Vec<String>) -> Option<String> {
     print!("{}", prompt);
     loop {
         match read_key()? {
-            Key::Char(b'\n') => {
+            Key::Char('\n') => {
                 println!();
                 let text: String = line.iter().collect();
                 if !text.trim().is_empty() && history.last() != Some(&text) {
@@ -95,11 +111,11 @@ pub fn readline(prompt: &str, history: &mut Vec<String>) -> Option<String> {
                 }
                 return Some(text);
             }
-            Key::Char(4) if line.is_empty() => {
+            Key::Char('\x04') if line.is_empty() => {
                 println!();
                 return None;
             }
-            Key::Char(0x08) | Key::Char(0x7f) => {
+            Key::Char('\x08') | Key::Char('\x7f') => {
                 if pos > 0 {
                     line.remove(pos - 1);
                     pos -= 1;
@@ -124,28 +140,28 @@ pub fn readline(prompt: &str, history: &mut Vec<String>) -> Option<String> {
                     print!("\x1b[C");
                 }
             }
-            Key::Home | Key::Char(1) => {
+            Key::Home | Key::Char('\x01') => {
                 pos = 0;
                 redraw(prompt, &line, pos);
             }
-            Key::End | Key::Char(5) => {
+            Key::End | Key::Char('\x05') => {
                 pos = line.len();
                 redraw(prompt, &line, pos);
             }
-            Key::Char(21) => {
+            Key::Char('\x15') => {
                 line.drain(..pos);
                 pos = 0;
                 redraw(prompt, &line, pos);
             }
-            Key::Char(11) => {
+            Key::Char('\x0b') => {
                 line.truncate(pos);
                 redraw(prompt, &line, pos);
             }
-            Key::Char(12) => {
+            Key::Char('\x0c') => {
                 print!("\x1b[2J\x1b[H");
                 redraw(prompt, &line, pos);
             }
-            Key::Char(3) => {
+            Key::Char('\x03') => {
                 println!("^C");
                 return Some(String::new());
             }
@@ -168,11 +184,11 @@ pub fn readline(prompt: &str, history: &mut Vec<String>) -> Option<String> {
                     redraw(prompt, &line, pos);
                 }
             }
-            Key::Char(c @ 0x20..=0x7e) => {
-                line.insert(pos, c as char);
+            Key::Char(c) if !c.is_control() => {
+                line.insert(pos, c);
                 pos += 1;
                 if pos == line.len() {
-                    print!("{}", c as char);
+                    print!("{}", c);
                 } else {
                     redraw(prompt, &line, pos);
                 }

@@ -5,7 +5,7 @@ use alloc::{string::String, vec::Vec};
 
 /// Tecla ya interpretada (las secuencias ESC [ ... se convierten aquí).
 enum Key {
-    Char(u8),
+    Char(char),
     Up,
     Down,
     Left,
@@ -20,8 +20,27 @@ enum Key {
 /// teclado PS/2 (que las fabrica el driver) como desde el terminal por el puerto serie.
 fn read_key() -> Key {
     let c = input::read_char();
-    if c != 0x1b {
-        return Key::Char(c);
+    if c < 0x80 && c != 0x1b {
+        return Key::Char(c as char);
+    }
+    if c >= 0x80 {
+        // Carácter UTF-8 de varios bytes (ñ, á, €...): llegan juntos desde el teclado.
+        let (mut acc, need) = match c {
+            0xC2..=0xDF => ((c & 0x1F) as u32, 1),
+            0xE0..=0xEF => ((c & 0x0F) as u32, 2),
+            0xF0..=0xF4 => ((c & 0x07) as u32, 3),
+            _ => return Key::Ignored,
+        };
+        for _ in 0..need {
+            if !input::has_data() {
+                timer::sleep_ms(10);
+            }
+            match input::pop() {
+                Some(b) if b & 0xC0 == 0x80 => acc = (acc << 6) | (b & 0x3F) as u32,
+                _ => return Key::Ignored,
+            }
+        }
+        return char::from_u32(acc).map(Key::Char).unwrap_or(Key::Ignored);
     }
     // ESC: ¿empieza una secuencia? Por el puerto serie los bytes pueden llegar con un
     // pequeño retraso, así que se espera un tick antes de decidir que fue un ESC suelto.
@@ -80,7 +99,7 @@ fn read_line(prompt: &str, history: &mut Vec<String>) -> String {
     print!("{}", prompt);
     loop {
         match read_key() {
-            Key::Char(b'\n') => {
+            Key::Char('\n') => {
                 println!();
                 let text: String = line.iter().collect();
                 if !text.trim().is_empty() && history.last() != Some(&text) {
@@ -91,7 +110,7 @@ fn read_line(prompt: &str, history: &mut Vec<String>) -> String {
                 }
                 return text;
             }
-            Key::Char(0x08) | Key::Char(0x7f) => {
+            Key::Char('\x08') | Key::Char('\x7f') => {
                 if pos > 0 {
                     line.remove(pos - 1);
                     pos -= 1;
@@ -116,31 +135,31 @@ fn read_line(prompt: &str, history: &mut Vec<String>) -> String {
                     print!("\x1b[C");
                 }
             }
-            Key::Home | Key::Char(1) => {
+            Key::Home | Key::Char('\x01') => {
                 pos = 0;
                 redraw(prompt, &line, pos);
             }
-            Key::End | Key::Char(5) => {
+            Key::End | Key::Char('\x05') => {
                 pos = line.len();
                 redraw(prompt, &line, pos);
             }
-            Key::Char(21) => {
+            Key::Char('\x15') => {
                 // Ctrl+U: borra desde el principio hasta el cursor
                 line.drain(..pos);
                 pos = 0;
                 redraw(prompt, &line, pos);
             }
-            Key::Char(11) => {
+            Key::Char('\x0b') => {
                 // Ctrl+K: borra desde el cursor hasta el final
                 line.truncate(pos);
                 redraw(prompt, &line, pos);
             }
-            Key::Char(12) => {
+            Key::Char('\x0c') => {
                 // Ctrl+L: limpia la pantalla y repinta la línea
                 print!("\x1b[2J\x1b[H");
                 redraw(prompt, &line, pos);
             }
-            Key::Char(3) => {
+            Key::Char('\x03') => {
                 // Ctrl+C: cancela la línea
                 println!("^C");
                 return String::new();
@@ -164,11 +183,11 @@ fn read_line(prompt: &str, history: &mut Vec<String>) -> String {
                     redraw(prompt, &line, pos);
                 }
             }
-            Key::Char(c @ 0x20..=0x7e) => {
-                line.insert(pos, c as char);
+            Key::Char(c) if !c.is_control() => {
+                line.insert(pos, c);
                 pos += 1;
                 if pos == line.len() {
-                    print!("{}", c as char); // al final de la línea basta con el eco
+                    print!("{}", c); // al final de la línea basta con el eco
                 } else {
                     redraw(prompt, &line, pos);
                 }
@@ -347,6 +366,7 @@ pub fn run() -> ! {
                 println!("  sleeper <nombre> crea una tarea que duerme entre mensajes (no usa CPU)");
                 println!("  sh            lanza el shell de ESPACIO DE USUARIO (escribe exit para volver)");
                 println!("  exec <p> [a]  como run, pero espera a que termine y muestra su codigo de salida");
+                println!("  teclado [es|us]  muestra o cambia la distribucion del teclado");
                 println!("  colores       prueba de pantalla: colores, acentos y cajas");
                 println!("  pantalla      resolucion y tamano de la consola");
                 println!("  ls            lista los archivos del initrd");
@@ -392,6 +412,12 @@ pub fn run() -> ! {
             ["exec", prog, rest @ ..] => exec_program(prog, &rest.join(" ")),
             ["exec"] => println!("uso: exec <programa> [argumentos]  (como run, pero espera a que termine)"),
             ["sh"] => exec_program("sh", ""),
+            ["teclado"] => println!("distribucion actual: {}  (usa: teclado es | teclado us)", crate::keyboard::layout_name()),
+            ["teclado", l] => match *l {
+                "es" => { crate::keyboard::set_layout(crate::keyboard::Layout::Es); println!("teclado: espanol"); }
+                "us" => { crate::keyboard::set_layout(crate::keyboard::Layout::Us); println!("teclado: americano (US)"); }
+                _ => println!("distribuciones: es, us"),
+            },
             ["colores"] => {
                 println!("Prueba de pantalla: acentos y eñes: áéíóú ÁÉÍÓÚ ñÑ ¿¡ü  ·  caracteres de caja:");
                 println!("┌────────────┬────────────┐");
