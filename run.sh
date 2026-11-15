@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 ( cd user && RUSTFLAGS="-C relocation-model=static" cargo build --release )
 mkdir -p initrd && rm -f initrd/*
 cp rootfs/* initrd/
-for p in hello primes crash sh memtest launcher badcalls bomb; do cp "user/target/x86_64-unknown-none/release/$p" "initrd/$p"; done
+for p in hello primes crash sh memtest launcher badcalls bomb http; do cp "user/target/x86_64-unknown-none/release/$p" "initrd/$p"; done
 
 # 2) Kernel (incrusta initrd/ al compilar)
 cargo build ${FEATURES:+--features "$FEATURES"}
@@ -25,4 +25,5 @@ exec timeout "${TIMEOUT:-0}" qemu-system-x86_64 -machine q35 -m 256M \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file=ovmf_vars.fd \
   -drive format=raw,file=fat:rw:esp \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=off,disable-modern=on \
   -serial stdio -display "${QEMU_DISPLAY:-none}" -no-reboot ${QEMU_EXTRA:-}

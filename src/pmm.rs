@@ -100,6 +100,36 @@ pub fn alloc_frame() -> Option<u64> {
     })
 }
 
+/// Reserva `count` frames FÍSICAMENTE contiguos y devuelve la dirección del primero.
+/// Los dispositivos que acceden a memoria por su cuenta (DMA) la necesitan así: no ven
+/// nuestras tablas de páginas, solo direcciones físicas.
+pub fn alloc_contiguous(count: u64) -> Option<u64> {
+    crate::cpu::without_interrupts(|| unsafe {
+        let p = &mut *(&raw mut PMM);
+        let mut run = 0;
+        let mut start = 0;
+        for f in 256..p.frames {
+            // (empezamos por encima de 1 MiB: la memoria baja tiene usos históricos)
+            if p.is_used(f) {
+                run = 0;
+                continue;
+            }
+            if run == 0 {
+                start = f;
+            }
+            run += 1;
+            if run == count {
+                for g in start..start + count {
+                    p.set(g, true);
+                }
+                p.free -= count;
+                return Some(start * FRAME_SIZE);
+            }
+        }
+        None
+    })
+}
+
 /// Devuelve un frame al gestor (también con interrupciones desactivadas).
 pub fn free_frame(phys: u64) {
     crate::cpu::without_interrupts(|| unsafe {

@@ -192,6 +192,9 @@ extern "C" fn exception_handler(f: &mut Frame) {
             _ => println!("IRQ {} inesperada", irq),
         }
         crate::pic::eoi(irq);
+        // Ctrl+C: si el teclado/serie pidió matar el proceso en primer plano, se hace ya
+        // (con el PIC avisado: esta función puede no volver).
+        crate::scheduler::process_kill_request();
         return;
     }
 

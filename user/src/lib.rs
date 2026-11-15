@@ -98,6 +98,40 @@ pub fn input_ready() -> bool {
     syscall3(11, 0, 0, 0) != 0
 }
 
+/// Resuelve un nombre (o una IP escrita con puntos) a una dirección IPv4.
+pub fn dns_resolve(name: &str) -> Result<[u8; 4], i64> {
+    let mut out = [0u8; 4];
+    let r = syscall3(12, name.as_ptr() as u64, name.len() as u64, out.as_mut_ptr() as u64);
+    if r < 0 { Err(r) } else { Ok(out) }
+}
+
+/// Abre una conexión TCP. Devuelve el id del socket (>= 0) o un error (< 0).
+pub fn tcp_connect(ip: [u8; 4], port: u16) -> i64 {
+    syscall3(13, u32::from_be_bytes(ip) as u64, port as u64, 0)
+}
+
+pub fn tcp_send(sock: i64, data: &[u8]) -> i64 {
+    syscall3(14, sock as u64, data.as_ptr() as u64, data.len() as u64)
+}
+
+/// Recibe datos. Devuelve los bytes leídos, 0 si el otro lado cerró, o un error (< 0).
+pub fn tcp_recv(sock: i64, buf: &mut [u8]) -> i64 {
+    syscall3(15, sock as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
+}
+
+pub fn tcp_close(sock: i64) {
+    syscall3(16, sock as u64, 0, 0);
+}
+
+pub fn net_info(buf: &mut [u8]) -> i64 {
+    syscall3(17, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+}
+
+/// Declara qué proceso tiene el control del teclado: Ctrl+C lo matará (0 = ninguno).
+pub fn set_foreground(pid: u64) {
+    syscall3(18, pid, 0, 0);
+}
+
 pub fn strerror(code: i64) -> &'static str {
     match code {
         -2 => "no existe el archivo",
@@ -107,7 +141,13 @@ pub fn strerror(code: i64) -> &'static str {
         -12 => "sin memoria",
         -14 => "puntero invalido",
         -22 => "argumento invalido",
+        -23 => "demasiados sockets abiertos",
         -38 => "llamada al sistema desconocida",
+        -100 => "sin red (todavia no hay IP)",
+        -104 => "conexion cerrada por el otro lado",
+        -110 => "tiempo agotado",
+        -111 => "conexion rechazada",
+        -112 => "el nombre no existe o el DNS no responde",
         _ => "error desconocido",
     }
 }

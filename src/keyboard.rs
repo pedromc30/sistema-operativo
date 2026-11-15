@@ -177,6 +177,9 @@ fn key_pressed(code: u8) {
     if CTRL.load(Ordering::Relaxed) && ch.is_ascii_alphabetic() {
         DEAD.store(0, Ordering::Relaxed);
         ch = (ch.to_ascii_lowercase() as u8 - b'a' + 1) as char; // Ctrl+A = 1 ... Ctrl+Z = 26
+        if ch == '\x03' && crate::scheduler::interrupt_foreground() {
+            return; // Ctrl+C con un programa en primer plano: se mata, no se escribe
+        }
         emit(ch);
         return;
     }

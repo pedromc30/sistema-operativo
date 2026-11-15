@@ -8,6 +8,7 @@
 use crate::{cpu, gdt, paging, syscall};
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::arch::{asm, global_asm};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const STACK_SIZE: usize = 32 * 1024;
 /// Valor centinela en el fondo de cada pila: si cambia, la tarea la desbordó.
@@ -410,25 +411,73 @@ pub fn exit_with(code: i64) -> ! {
     cpu::without_interrupts(|| {
         let s = sched();
         let cur = s.current;
-        for t in s.tasks.iter_mut() {
-            if t.id == cur {
-                t.state = State::Dead;
-            }
-        }
-        // Guardar el código hasta que alguien lo recoja con wait (solo los 64 últimos).
-        if s.exit_codes.len() >= 64 {
-            s.exit_codes.remove(0);
-        }
-        s.exit_codes.push((cur, code));
-        for t in s.tasks.iter_mut() {
-            if t.state == State::WaitExit(cur) {
-                t.state = State::Ready;
-            }
-        }
+        mark_dead(cur, code);
         unsafe { schedule() }; // no vuelve: nadie reanuda una tarea muerta
     });
     loop {
         unsafe { asm!("hlt") };
+    }
+}
+
+/// Marca una tarea como muerta, guarda su código, despierta a sus esperadores y libera
+/// sus sockets de red. Requiere interrupciones desactivadas.
+fn mark_dead(id: u64, code: i64) {
+    let s = sched();
+    for t in s.tasks.iter_mut() {
+        if t.id == id {
+            t.state = State::Dead;
+        }
+    }
+    crate::net::close_owned(id);
+    // Guardar el código hasta que alguien lo recoja con wait (solo los 64 últimos).
+    if s.exit_codes.len() >= 64 {
+        s.exit_codes.remove(0);
+    }
+    s.exit_codes.push((id, code));
+    for t in s.tasks.iter_mut() {
+        if t.state == State::WaitExit(id) {
+            t.state = State::Ready;
+        }
+    }
+}
+
+// ---- Proceso en primer plano y Ctrl+C ----
+
+static FOREGROUND: AtomicU64 = AtomicU64::new(0);
+static KILL_REQUEST: AtomicBool = AtomicBool::new(false);
+
+/// El shell declara qué proceso tiene ahora el control del teclado (0 = ninguno).
+pub fn set_foreground(pid: u64) {
+    FOREGROUND.store(pid, Ordering::Relaxed);
+}
+
+/// Llamada desde el manejador de teclado/serie al recibir Ctrl+C. Si hay un proceso en
+/// primer plano, anota la petición de matarlo y devuelve true (la tecla se consume).
+pub fn interrupt_foreground() -> bool {
+    if FOREGROUND.load(Ordering::Relaxed) != 0 {
+        KILL_REQUEST.store(true, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+/// Se llama al final de una IRQ de entrada, DESPUÉS de avisar al PIC (EOI): si hubo una
+/// petición de Ctrl+C, termina el proceso en primer plano con el código 130.
+pub fn process_kill_request() {
+    if !KILL_REQUEST.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    let pid = FOREGROUND.load(Ordering::Relaxed);
+    if pid == 0 {
+        return;
+    }
+    if pid == sched().current {
+        exit_with(130); // el proceso interrumpido era él mismo: no vuelve
+    }
+    let s = sched();
+    if s.tasks.iter().any(|t| t.id == pid && t.state != State::Dead) {
+        mark_dead(pid, 130);
     }
 }
 

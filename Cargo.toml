@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Pila TCP/IP (Ethernet, ARP, IPv4, DHCP, DNS, TCP, UDP, ICMP) para sistemas sin SO.
+smoltcp = { version = "0.14", default-features = false, features = [
+    "alloc", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "proto-dns",
+    "socket-tcp", "socket-udp", "socket-icmp", "socket-dhcpv4", "socket-dns",
+] }
 
 [profile.dev]
 panic = "abort"
@@ -17,3 +22,7 @@ crash-div = []
 crash-ud = []
 crash-heap = []
 small-heap = []
+
+# La pila de red se compila optimizada incluso en modo debug: si no, es demasiado lenta.
+[profile.dev.package.smoltcp]
+opt-level = 3

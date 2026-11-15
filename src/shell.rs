@@ -1,6 +1,6 @@
 //! Mini shell: lee una línea, la parte en palabras (usa el heap) y ejecuta.
 
-use crate::{fs, heap, input, pmm, process, scheduler, timer};
+use crate::{fs, heap, input, net, pci, pmm, process, scheduler, timer};
 use alloc::{string::String, vec::Vec};
 
 /// Tecla ya interpretada (las secuencias ESC [ ... se convierten aquí).
@@ -252,10 +252,24 @@ fn exec_program(prog: &str, args: &str) {
     };
     match process::spawn_elf(prog, data, args) {
         Ok(id) => {
+            scheduler::set_foreground(id); // Ctrl+C mata este proceso
             let code = scheduler::wait_for_exit(id);
+            scheduler::set_foreground(0);
             println!("[proceso {} ('{}') termino con codigo {}]", id, prog, code);
         }
         Err(e) => println!("no se pudo ejecutar '{}': {}", prog, e),
+    }
+}
+
+fn net_error(e: i64) -> &'static str {
+    match e {
+        net::ENETDOWN => "sin red (aun no hay IP; espera al DHCP)",
+        net::ETIMEDOUT => "tiempo agotado",
+        net::ENOTFOUND => "el nombre no existe o el DNS no responde",
+        net::ECONNREFUSED => "conexion rechazada",
+        net::ECONNRESET => "conexion cerrada por el otro lado",
+        net::EINVAL => "nombre invalido",
+        _ => "error de red",
     }
 }
 
@@ -366,6 +380,10 @@ pub fn run() -> ! {
                 println!("  sleeper <nombre> crea una tarea que duerme entre mensajes (no usa CPU)");
                 println!("  sh            lanza el shell de ESPACIO DE USUARIO (escribe exit para volver)");
                 println!("  exec <p> [a]  como run, pero espera a que termine y muestra su codigo de salida");
+                println!("  net           estado de la red (IP, puerta de enlace, DNS, paquetes)");
+                println!("  pci           lista los dispositivos PCI");
+                println!("  ping <ip|nombre>  prueba de conectividad ICMP");
+                println!("  dns <nombre>  resuelve un nombre a una IP");
                 println!("  teclado [es|us]  muestra o cambia la distribucion del teclado");
                 println!("  colores       prueba de pantalla: colores, acentos y cajas");
                 println!("  pantalla      resolucion y tamano de la consola");
@@ -418,6 +436,60 @@ pub fn run() -> ! {
                 "us" => { crate::keyboard::set_layout(crate::keyboard::Layout::Us); println!("teclado: americano (US)"); }
                 _ => println!("distribuciones: es, us"),
             },
+            ["net"] => println!("{}", net::info()),
+            ["dns", name] => match net::resolve(name) {
+                Ok(ip) => println!("{} -> {}.{}.{}.{}", name, ip[0], ip[1], ip[2], ip[3]),
+                Err(e) => println!("no se pudo resolver '{}': {}", name, net_error(e)),
+            },
+            ["ping", target] => match net::resolve(target) {
+                Ok(ip) => {
+                    println!("PING {} ({}.{}.{}.{})", target, ip[0], ip[1], ip[2], ip[3]);
+                    let (mut ok, mut total) = (0, 0u64);
+                    for seq in 1..=4u16 {
+                        match net::ping(ip, seq) {
+                            Ok(ms) => {
+                                ok += 1;
+                                total += ms;
+                                println!("respuesta de {}.{}.{}.{}: seq={} tiempo={} ms", ip[0], ip[1], ip[2], ip[3], seq, ms);
+                            }
+                            Err(e) => println!("seq={}: {}", seq, net_error(e)),
+                        }
+                        timer::sleep_ms(500);
+                    }
+                    println!("{} de 4 respuestas{}", ok, if ok > 0 { alloc::format!(", media {} ms", total / ok) } else { String::new() });
+                }
+                Err(e) => println!("no se pudo resolver '{}': {}", target, net_error(e)),
+            },
+            ["ping"] => println!("uso: ping <ip|nombre>"),
+            ["dns"] => println!("uso: dns <nombre>"),
+            ["leaktest", what, n] => {
+                // Diagnostico: repite UNA operacion n veces y mide cuanto heap del kernel se pierde.
+                let n: u32 = n.parse().unwrap_or(10);
+                let before = heap::free_bytes();
+                for _ in 0..n {
+                    match *what {
+                        "sleep" => timer::sleep_ms(10),
+                        "dns" => { let _ = net::resolve("local.test"); }
+                        "dnsfail" => { let _ = net::resolve("nada.test"); }
+                        "ping" => { let _ = net::ping([10, 0, 2, 2], 1); }
+                        "info" => { let _ = net::info(); }
+                        "print" => { let _ = alloc::format!("{} {}", 12345, "texto"); }
+                        _ => {}
+                    }
+                }
+                let after = heap::free_bytes();
+                println!("leaktest {} x{}: heap perdido = {} bytes ({:.1} por iteracion)", what, n, before as i64 - after as i64, (before as i64 - after as i64) as f64 / n as f64);
+            }
+            ["dnsserver", ip] => match net::parse_ip(ip) {
+                Some(a) if net::set_dns(a) => println!("servidor DNS: {}", ip),
+                _ => println!("IP invalida o sin red"),
+            },
+            ["pci"] => {
+                println!("BUS:DIS.FN  VENDOR:MODELO  CLASE");
+                for d in pci::devices() {
+                    println!("{:02x}:{:02x}.{}    {:04x}:{:04x}      {}", d.bus, d.dev, d.func, d.vendor, d.device, pci::class_name(d.class, d.subclass));
+                }
+            }
             ["colores"] => {
                 println!("Prueba de pantalla: acentos y eñes: áéíóú ÁÉÍÓÚ ñÑ ¿¡ü  ·  caracteres de caja:");
                 println!("┌────────────┬────────────┐");

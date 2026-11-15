@@ -16,9 +16,16 @@
 //!    8 wait(id)                           espera a que termine y devuelve su código
 //!    9 fs_list(ptr, len)                  escribe "nombre tamaño\n" por cada archivo
 //!   10 fs_read(nombre, n, ptr, len, off)  lee de un archivo del initrd
+//!   12 dns_resolve(nombre, n, out)       resuelve un nombre; escribe 4 bytes (IPv4) en out
+//!   13 tcp_connect(ip, puerto)           conecta (bloquea hasta 10 s); devuelve un id de socket
+//!   14 tcp_send(id, ptr, len)            envía (bloquea si el búfer está lleno)
+//!   15 tcp_recv(id, ptr, len)            recibe (bloquea); 0 = el otro lado cerró
+//!   16 tcp_close(id)                     cierra la conexión
+//!   17 net_info(ptr, len)                texto con el estado de la red
+//!   18 set_foreground(pid)               Ctrl+C matará a ese proceso (0 = ninguno)
 //!   11 input_ready()                     1 si hay entrada pendiente (no bloquea), 0 si no
 
-use crate::{cpu, fs, input, paging, pmm, process, scheduler, serial, timer};
+use crate::{cpu, fs, input, net, paging, pmm, process, scheduler, serial, timer};
 use core::arch::global_asm;
 
 const MSR_EFER: u32 = 0xC000_0080;
@@ -110,6 +117,16 @@ extern "C" fn syscall_dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
         9 => sys_fs_list(a0, a1),
         10 => sys_fs_read(a0, a1, a2, a3, a4),
         11 => input::has_data() as i64,
+        12 => sys_dns_resolve(a0, a1, a2),
+        13 => sys_tcp_connect(a0, a1),
+        14 => sys_tcp_send(a0, a1, a2),
+        15 => sys_tcp_recv(a0, a1, a2),
+        16 => net::tcp_close(scheduler::current_id(), a0 as usize).map_or_else(|e| e, |_| 0),
+        17 => sys_net_info(a0, a1),
+        18 => {
+            scheduler::set_foreground(a0);
+            0
+        }
         _ => ENOSYS,
     }
 }
@@ -273,5 +290,110 @@ fn sys_fs_read(name_ptr: u64, name_len: u64, buf: u64, buf_len: u64, offset: u64
     let off = (offset as usize).min(data.len());
     let n = (data.len() - off).min(buf_len as usize);
     unsafe { core::ptr::copy_nonoverlapping(data.as_ptr().add(off), buf as *mut u8, n) };
+    n as i64
+}
+
+// ---- Red ----
+
+fn sys_dns_resolve(name_ptr: u64, name_len: u64, out: u64) -> i64 {
+    let name = match user_str(name_ptr, name_len, 253) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    if !paging::user_range_writable(out, 4) {
+        return EFAULT;
+    }
+    match net::resolve(name) {
+        Ok(ip) => {
+            unsafe { core::ptr::copy_nonoverlapping(ip.as_ptr(), out as *mut u8, 4) };
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+fn sys_tcp_connect(ip: u64, port: u64) -> i64 {
+    if port == 0 || port > 65535 || ip > u32::MAX as u64 {
+        return EINVAL;
+    }
+    let me = scheduler::current_id();
+    let id = match net::tcp_open(me, (ip as u32).to_be_bytes(), port as u16) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    let deadline = timer::uptime_ms() + 10_000;
+    loop {
+        match net::tcp_status(me, id) {
+            Ok(net::TcpStatus::Connected) => return id as i64,
+            Ok(net::TcpStatus::Closed) => {
+                let _ = net::tcp_close(me, id);
+                return net::ECONNREFUSED;
+            }
+            Ok(net::TcpStatus::Connecting) => {}
+            Err(e) => return e,
+        }
+        if timer::uptime_ms() > deadline {
+            let _ = net::tcp_close(me, id);
+            return net::ETIMEDOUT;
+        }
+        timer::sleep_ms(10);
+    }
+}
+
+fn sys_tcp_send(id: u64, ptr: u64, len: u64) -> i64 {
+    let len = len.min(16 * 1024);
+    if !paging::user_range_ok(ptr, len) {
+        return EFAULT;
+    }
+    let me = scheduler::current_id();
+    let deadline = timer::uptime_ms() + 30_000;
+    loop {
+        // Se copia a un búfer del kernel: no se retiene una referencia a memoria de usuario.
+        let data = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        match net::tcp_send(me, id as usize, data) {
+            Ok(0) if len > 0 => {} // búfer de salida lleno: esperar
+            Ok(n) => return n as i64,
+            Err(e) => return e,
+        }
+        if timer::uptime_ms() > deadline {
+            return net::ETIMEDOUT;
+        }
+        timer::sleep_ms(10);
+    }
+}
+
+fn sys_tcp_recv(id: u64, ptr: u64, len: u64) -> i64 {
+    let len = len.min(16 * 1024);
+    if len == 0 {
+        return 0;
+    }
+    if !paging::user_range_writable(ptr, len) {
+        return EFAULT;
+    }
+    let me = scheduler::current_id();
+    let deadline = timer::uptime_ms() + 60_000;
+    loop {
+        let buf = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
+        match net::tcp_recv(me, id as usize, buf) {
+            Ok(Some(0)) => {} // aún no hay datos
+            Ok(Some(n)) => return n as i64,
+            Ok(None) => return 0, // el otro lado cerró: fin de datos
+            Err(e) => return e,
+        }
+        if timer::uptime_ms() > deadline {
+            return net::ETIMEDOUT;
+        }
+        timer::sleep_ms(10);
+    }
+}
+
+fn sys_net_info(ptr: u64, len: u64) -> i64 {
+    let len = len.min(1024);
+    if !paging::user_range_writable(ptr, len) {
+        return EFAULT;
+    }
+    let text = net::info();
+    let n = text.len().min(len as usize);
+    unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), ptr as *mut u8, n) };
     n as i64
 }

@@ -16,7 +16,9 @@ mod idt;
 mod input;
 mod keyboard;
 mod limine;
+mod net;
 mod paging;
+mod pci;
 mod pic;
 mod pmm;
 mod port;
@@ -25,6 +27,7 @@ mod scheduler;
 mod shell;
 mod syscall;
 mod timer;
+mod virtio_net;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -84,6 +87,10 @@ extern "C" fn _start() -> ! {
     }
 
     timer_demo();
+    match net::init() {
+        Ok(()) => println!("[ok] tarjeta de red iniciada (DHCP en curso)"),
+        Err(e) => println!("[--] red: {}", e),
+    }
     shell::run();
 }
 

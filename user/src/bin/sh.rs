@@ -7,7 +7,7 @@ extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
 use user::readline::readline;
-use user::{entry, fs_list, fs_read, getpid, println, spawn, strerror, uptime_ms, wait};
+use user::{entry, fs_list, fs_read, getpid, net_info, println, set_foreground, spawn, strerror, uptime_ms, wait};
 
 entry!(main);
 
@@ -65,6 +65,11 @@ fn main(_args: &str) {
                 println!("  hello, primes [n [rep]], crash [stack|ud|kernel], memtest [shrink|leak], launcher");
             }
             ["pid"] => println!("{}", getpid()),
+            ["net"] => {
+                let mut b = [0u8; 512];
+                let n = net_info(&mut b);
+                println!("{}", core::str::from_utf8(&b[..n.max(0) as usize]).unwrap_or(""));
+            }
             ["uptime"] => println!("{} ms", uptime_ms()),
             ["ls"] => cmd_ls(),
             ["cat", f] => cmd_cat(f),
@@ -76,7 +81,9 @@ fn main(_args: &str) {
                 if pid < 0 {
                     println!("sh: no se pudo ejecutar '{}': {}", prog, strerror(pid));
                 } else {
+                    set_foreground(pid as u64); // Ctrl+C mata a este programa, no al shell
                     let code = wait(pid as u64);
+                    set_foreground(0);
                     println!("[{} (pid {}) termino con codigo {}]", prog, pid, code);
                 }
             }

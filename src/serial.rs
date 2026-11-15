@@ -29,6 +29,9 @@ pub fn on_rx() {
         while inb(COM1 + 5) & 1 != 0 {
             let b = inb(COM1);
             // Las terminales mandan \r al pulsar Enter.
+            if b == 3 && crate::scheduler::interrupt_foreground() {
+                continue; // Ctrl+C con un programa en primer plano
+            }
             crate::input::push(if b == b'\r' { b'\n' } else { b });
         }
     }
