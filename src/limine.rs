@@ -100,3 +100,75 @@ pub fn memmap() -> Option<impl Iterator<Item = &'static MemmapEntry>> {
         Some((0..count).map(move |i| &**entries.add(i)))
     }
 }
+
+// ---- Framebuffer: una zona de memoria de vídeo donde cada píxel es un número ----
+
+#[repr(C)]
+struct FbRaw {
+    address: *mut u8,
+    width: u64,
+    height: u64,
+    pitch: u64, // bytes por fila (puede ser mayor que width * bytes por píxel)
+    bpp: u16,
+    memory_model: u8,
+    red_mask_size: u8,
+    red_mask_shift: u8,
+    green_mask_size: u8,
+    green_mask_shift: u8,
+    blue_mask_size: u8,
+    blue_mask_shift: u8,
+}
+
+#[repr(C)]
+struct FbResponse {
+    _revision: u64,
+    count: u64,
+    framebuffers: *const *const FbRaw,
+}
+
+#[used]
+#[link_section = ".requests"]
+static mut FRAMEBUFFER_REQUEST: Request<FbResponse> = Request {
+    id: [COMMON_MAGIC[0], COMMON_MAGIC[1], 0x9d5827dcd881dd75, 0xa3148604f6fab11b],
+    revision: 0,
+    response: core::ptr::null(),
+};
+
+#[derive(Clone, Copy)]
+pub struct Framebuffer {
+    pub addr: *mut u8,
+    pub width: usize,
+    pub height: usize,
+    pub pitch: usize,
+    pub bpp: u16,
+    pub red_shift: u8,
+    pub green_shift: u8,
+    pub blue_shift: u8,
+    pub red_size: u8,
+    pub green_size: u8,
+    pub blue_size: u8,
+}
+
+/// El primer framebuffer, si el bootloader nos dio uno.
+pub fn framebuffer() -> Option<Framebuffer> {
+    unsafe {
+        let r = read_volatile(addr_of!(FRAMEBUFFER_REQUEST.response));
+        if r.is_null() || (*r).count == 0 {
+            return None;
+        }
+        let f = &**(*r).framebuffers;
+        Some(Framebuffer {
+            addr: f.address,
+            width: f.width as usize,
+            height: f.height as usize,
+            pitch: f.pitch as usize,
+            bpp: f.bpp,
+            red_shift: f.red_mask_shift,
+            green_shift: f.green_mask_shift,
+            blue_shift: f.blue_mask_shift,
+            red_size: f.red_mask_size,
+            green_size: f.green_mask_size,
+            blue_size: f.blue_mask_size,
+        })
+    }
+}

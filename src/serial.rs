@@ -45,6 +45,7 @@ impl Write for Serial {
                 outb(COM1, b);
             }
         }
+        crate::console::write_str(s); // y también en la pantalla
         Ok(())
     }
 }
@@ -58,6 +59,7 @@ pub fn write_bytes(bytes: &[u8]) {
                 outb(COM1, b);
             }
         }
+        crate::console::write_bytes(bytes);
     });
 }
 

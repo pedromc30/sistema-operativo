@@ -175,7 +175,7 @@ fn elf_fuzz(iterations: u64) {
 }
 
 pub fn run() -> ! {
-    println!();
+    crate::console::clear(); // la pantalla empieza limpia (la salida por serie no se toca)
     println!("=== Shell de RustOS ===  (escribe 'help')");
     loop {
         print!("rustos> ");
@@ -195,6 +195,8 @@ pub fn run() -> ! {
                 println!("  sleeper <nombre> crea una tarea que duerme entre mensajes (no usa CPU)");
                 println!("  sh            lanza el shell de ESPACIO DE USUARIO (escribe exit para volver)");
                 println!("  exec <p> [a]  como run, pero espera a que termine y muestra su codigo de salida");
+                println!("  colores       prueba de pantalla: colores, acentos y cajas");
+                println!("  pantalla      resolucion y tamano de la consola");
                 println!("  ls            lista los archivos del initrd");
                 println!("  cat <archivo> muestra un archivo de texto");
                 println!("  run <prog> [args] ejecuta un programa en modo usuario (ELF del initrd o interno)");
@@ -238,6 +240,25 @@ pub fn run() -> ! {
             ["exec", prog, rest @ ..] => exec_program(prog, &rest.join(" ")),
             ["exec"] => println!("uso: exec <programa> [argumentos]  (como run, pero espera a que termine)"),
             ["sh"] => exec_program("sh", ""),
+            ["colores"] => {
+                println!("Prueba de pantalla: acentos y eñes: áéíóú ÁÉÍÓÚ ñÑ ¿¡ü  ·  caracteres de caja:");
+                println!("┌────────────┬────────────┐");
+                println!("│ RustOS     │ pantalla   │");
+                println!("└────────────┴────────────┘");
+                for fg in 30..=37 {
+                    print!("\x1b[{}m ███ \x1b[0m", fg);
+                }
+                println!();
+                for fg in 90..=97 {
+                    print!("\x1b[{}m ███ \x1b[0m", fg);
+                }
+                println!();
+                println!("\x1b[1;37;44m texto blanco sobre azul \x1b[0m  \x1b[7m invertido \x1b[0m  \x1b[41m fondo rojo \x1b[0m");
+            }
+            ["pantalla"] => match crate::console::info() {
+                Some((c, f, w, h)) => println!("{}x{} px; consola de {} columnas x {} filas", w, h, c, f),
+                None => println!("sin pantalla grafica (solo puerto serie)"),
+            },
             ["ls"] => {
                 println!("{:<14} {:>8}", "ARCHIVO", "BYTES");
                 for (name, size) in fs::list() {

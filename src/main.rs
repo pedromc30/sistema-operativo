@@ -5,8 +5,10 @@ extern crate alloc;
 
 #[macro_use]
 mod serial;
+mod console;
 mod cpu;
 mod elf;
+mod font;
 mod fs;
 mod gdt;
 mod heap;
@@ -40,7 +42,12 @@ extern "C" fn _start() -> ! {
         println!("Limine base revision no soportada");
         halt();
     }
+    let pantalla = console::init();
     println!("Hola desde RustOS (x86_64)!");
+    match console::info() {
+        Some((c, f, w, h)) => println!("[ok] pantalla {}x{} px, consola de {}x{} caracteres", w, h, c, f),
+        None => println!("[--] sin pantalla ({}): solo puerto serie", if pantalla { "?" } else { "sin framebuffer" }),
+    }
 
     unsafe {
         gdt::init();
