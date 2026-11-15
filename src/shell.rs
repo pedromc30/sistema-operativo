@@ -3,23 +3,175 @@
 use crate::{fs, heap, input, pmm, process, scheduler, timer};
 use alloc::{string::String, vec::Vec};
 
-fn read_line() -> String {
-    let mut s = String::new();
+/// Tecla ya interpretada (las secuencias ESC [ ... se convierten aquí).
+enum Key {
+    Char(u8),
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    Delete,
+    Ignored,
+}
+
+/// Lee una tecla. Las flechas llegan como secuencias ANSI (ESC [ A...), tanto desde el
+/// teclado PS/2 (que las fabrica el driver) como desde el terminal por el puerto serie.
+fn read_key() -> Key {
+    let c = input::read_char();
+    if c != 0x1b {
+        return Key::Char(c);
+    }
+    // ESC: ¿empieza una secuencia? Por el puerto serie los bytes pueden llegar con un
+    // pequeño retraso, así que se espera un tick antes de decidir que fue un ESC suelto.
+    if !input::has_data() {
+        timer::sleep_ms(10);
+    }
+    match input::pop() {
+        Some(b'[') | Some(b'O') => {}
+        _ => return Key::Ignored,
+    }
+    let mut param: u32 = 0;
     loop {
-        let c = input::read_char();
-        match c {
-            b'\n' => {
-                println!();
-                return s;
-            }
-            0x08 | 0x7f => {
-                if s.pop().is_some() {
-                    print!("\x08 \x08"); // retrocede, borra y retrocede
+        if !input::has_data() {
+            timer::sleep_ms(10);
+        }
+        let Some(b) = input::pop() else { return Key::Ignored };
+        match b {
+            b'0'..=b'9' => param = param * 10 + (b - b'0') as u32,
+            b';' => param = 0,
+            b'A' => return Key::Up,
+            b'B' => return Key::Down,
+            b'C' => return Key::Right,
+            b'D' => return Key::Left,
+            b'H' => return Key::Home,
+            b'F' => return Key::End,
+            b'~' => {
+                return match param {
+                    1 | 7 => Key::Home,
+                    3 => Key::Delete,
+                    4 | 8 => Key::End,
+                    _ => Key::Ignored,
                 }
             }
-            0x20..=0x7e => {
-                s.push(c as char);
-                print!("{}", c as char); // eco
+            0x40..=0x7e => return Key::Ignored,
+            _ => {}
+        }
+    }
+}
+
+/// Repinta la línea entera y deja el cursor en su sitio.
+fn redraw(prompt: &str, line: &[char], pos: usize) {
+    let text: String = line.iter().collect();
+    print!("\r{}{}\x1b[K", prompt, text);
+    if pos < line.len() {
+        print!("\x1b[{}D", line.len() - pos);
+    }
+}
+
+/// Lee una línea con edición (flechas, Inicio/Fin, Supr, Retroceso, Ctrl+A/E/U/K/L/C) e
+/// historial (flechas arriba/abajo).
+fn read_line(prompt: &str, history: &mut Vec<String>) -> String {
+    let mut line: Vec<char> = Vec::new();
+    let mut pos = 0usize;
+    let mut hist = history.len();
+    let mut draft: Vec<char> = Vec::new(); // lo que se estaba escribiendo antes de subir en el historial
+    print!("{}", prompt);
+    loop {
+        match read_key() {
+            Key::Char(b'\n') => {
+                println!();
+                let text: String = line.iter().collect();
+                if !text.trim().is_empty() && history.last() != Some(&text) {
+                    if history.len() >= 50 {
+                        history.remove(0);
+                    }
+                    history.push(text.clone());
+                }
+                return text;
+            }
+            Key::Char(0x08) | Key::Char(0x7f) => {
+                if pos > 0 {
+                    line.remove(pos - 1);
+                    pos -= 1;
+                    redraw(prompt, &line, pos);
+                }
+            }
+            Key::Delete => {
+                if pos < line.len() {
+                    line.remove(pos);
+                    redraw(prompt, &line, pos);
+                }
+            }
+            Key::Left => {
+                if pos > 0 {
+                    pos -= 1;
+                    print!("\x1b[D");
+                }
+            }
+            Key::Right => {
+                if pos < line.len() {
+                    pos += 1;
+                    print!("\x1b[C");
+                }
+            }
+            Key::Home | Key::Char(1) => {
+                pos = 0;
+                redraw(prompt, &line, pos);
+            }
+            Key::End | Key::Char(5) => {
+                pos = line.len();
+                redraw(prompt, &line, pos);
+            }
+            Key::Char(21) => {
+                // Ctrl+U: borra desde el principio hasta el cursor
+                line.drain(..pos);
+                pos = 0;
+                redraw(prompt, &line, pos);
+            }
+            Key::Char(11) => {
+                // Ctrl+K: borra desde el cursor hasta el final
+                line.truncate(pos);
+                redraw(prompt, &line, pos);
+            }
+            Key::Char(12) => {
+                // Ctrl+L: limpia la pantalla y repinta la línea
+                print!("\x1b[2J\x1b[H");
+                redraw(prompt, &line, pos);
+            }
+            Key::Char(3) => {
+                // Ctrl+C: cancela la línea
+                println!("^C");
+                return String::new();
+            }
+            Key::Up => {
+                if hist > 0 {
+                    if hist == history.len() {
+                        draft = line.clone();
+                    }
+                    hist -= 1;
+                    line = history[hist].chars().collect();
+                    pos = line.len();
+                    redraw(prompt, &line, pos);
+                }
+            }
+            Key::Down => {
+                if hist < history.len() {
+                    hist += 1;
+                    line = if hist == history.len() { draft.clone() } else { history[hist].chars().collect() };
+                    pos = line.len();
+                    redraw(prompt, &line, pos);
+                }
+            }
+            Key::Char(c @ 0x20..=0x7e) => {
+                line.insert(pos, c as char);
+                pos += 1;
+                if pos == line.len() {
+                    print!("{}", c as char); // al final de la línea basta con el eco
+                } else {
+                    redraw(prompt, &line, pos);
+                }
             }
             _ => {}
         }
@@ -177,9 +329,9 @@ fn elf_fuzz(iterations: u64) {
 pub fn run() -> ! {
     crate::console::clear(); // la pantalla empieza limpia (la salida por serie no se toca)
     println!("=== Shell de RustOS ===  (escribe 'help')");
+    let mut history: Vec<String> = Vec::new();
     loop {
-        print!("rustos> ");
-        let line = read_line();
+        let line = read_line("rustos> ", &mut history);
         let parts: Vec<&str> = line.split_whitespace().collect();
         match parts.as_slice() {
             [] => {}

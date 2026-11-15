@@ -29,6 +29,22 @@ pub fn has_data() -> bool {
     TAIL.load(Ordering::Acquire) != HEAD.load(Ordering::Acquire)
 }
 
+/// Mete una secuencia COMPLETA (p. ej. ESC [ A de la flecha arriba) o ninguno de sus bytes:
+/// así el lector nunca ve una secuencia cortada por la mitad si la cola está casi llena.
+pub fn push_seq(seq: &[u8]) {
+    let head = HEAD.load(Ordering::Relaxed);
+    let tail = TAIL.load(Ordering::Acquire);
+    let used = (head + SIZE - tail) % SIZE;
+    if SIZE - 1 - used < seq.len() {
+        return;
+    }
+    for (i, &c) in seq.iter().enumerate() {
+        BUF[(head + i) % SIZE].store(c, Ordering::Relaxed);
+    }
+    HEAD.store((head + seq.len()) % SIZE, Ordering::Release);
+    crate::scheduler::wake_input();
+}
+
 pub fn pop() -> Option<u8> {
     let tail = TAIL.load(Ordering::Relaxed);
     if tail == HEAD.load(Ordering::Acquire) {

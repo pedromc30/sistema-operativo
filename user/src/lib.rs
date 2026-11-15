@@ -8,6 +8,7 @@
 extern crate alloc;
 
 pub mod heap;
+pub mod readline;
 
 use core::arch::asm;
 use core::fmt::{self, Write};
@@ -90,6 +91,11 @@ pub fn fs_list(buf: &mut [u8]) -> i64 {
 /// Lee de un archivo del initrd a partir de `offset`. Devuelve los bytes leídos (0 = fin).
 pub fn fs_read(name: &str, buf: &mut [u8], offset: u64) -> i64 {
     syscall5(10, name.as_ptr() as u64, name.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, offset)
+}
+
+/// ¿Hay entrada pendiente? No bloquea.
+pub fn input_ready() -> bool {
+    syscall3(11, 0, 0, 0) != 0
 }
 
 pub fn strerror(code: i64) -> &'static str {

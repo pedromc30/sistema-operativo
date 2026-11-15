@@ -16,6 +16,7 @@
 //!    8 wait(id)                           espera a que termine y devuelve su código
 //!    9 fs_list(ptr, len)                  escribe "nombre tamaño\n" por cada archivo
 //!   10 fs_read(nombre, n, ptr, len, off)  lee de un archivo del initrd
+//!   11 input_ready()                     1 si hay entrada pendiente (no bloquea), 0 si no
 
 use crate::{cpu, fs, input, paging, pmm, process, scheduler, serial, timer};
 use core::arch::global_asm;
@@ -108,6 +109,7 @@ extern "C" fn syscall_dispatch(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
         8 => scheduler::wait_for_exit(a0),
         9 => sys_fs_list(a0, a1),
         10 => sys_fs_read(a0, a1, a2, a3, a4),
+        11 => input::has_data() as i64,
         _ => ENOSYS,
     }
 }

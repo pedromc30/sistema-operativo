@@ -6,40 +6,10 @@
 extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
-use user::{entry, fs_list, fs_read, getpid, print, println, read, spawn, strerror, uptime_ms, wait};
+use user::readline::readline;
+use user::{entry, fs_list, fs_read, getpid, println, spawn, strerror, uptime_ms, wait};
 
 entry!(main);
-
-fn read_line() -> Option<String> {
-    let mut line = String::new();
-    loop {
-        let mut b = [0u8; 1];
-        if read(&mut b) < 1 {
-            return None;
-        }
-        match b[0] {
-            b'\n' => {
-                println!();
-                return Some(line);
-            }
-            0x7f | 0x08 => {
-                if line.pop().is_some() {
-                    print!("\x08 \x08");
-                }
-            }
-            4 if line.is_empty() => {
-                // Ctrl-D en línea vacía: fin de entrada
-                println!();
-                return None;
-            }
-            0x20..=0x7e => {
-                line.push(b[0] as char);
-                print!("{}", b[0] as char);
-            }
-            _ => {}
-        }
-    }
-}
 
 fn cmd_ls() {
     let mut buf = [0u8; 1024];
@@ -82,9 +52,9 @@ fn cmd_cat(name: &str) {
 
 fn main(_args: &str) {
     println!("[sh] shell en espacio de usuario (pid {}). Escribe 'help'.", getpid());
+    let mut history: Vec<String> = Vec::new();
     loop {
-        print!("usuario$ ");
-        let Some(line) = read_line() else { break };
+        let Some(line) = readline("usuario$ ", &mut history) else { break };
         let parts: Vec<&str> = line.split_whitespace().collect();
         match parts.as_slice() {
             [] => {}
